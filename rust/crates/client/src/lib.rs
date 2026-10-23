@@ -481,6 +481,108 @@ fn save_turn(dir: &Path, c: &TurnCreds) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------- 多中继
+
+/// 按顺序挑第一个能连上的中继，返回连接和实际用到的地址。
+///
+/// 为什么要按顺序试、而不是轮流或随机：列表首位是"最近一次用成功的"（见
+/// `promote`），命中率最高，正常情况只连一次；只有它挂了才往下走。
+///
+/// **只能用于"哪个实例都能干"的事**（投递、索取 TURN 凭据）。
+/// 收消息不能用它——见 `a_recv_once` 里的说明。
+async fn connect_first(relays: &[String]) -> Result<(Conn, String)> {
+    let mut last: Option<anyhow::Error> = None;
+    for r in relays {
+        let addr = r.trim();
+        if addr.is_empty() {
+            continue;
+        }
+        match Conn::connect(addr).await {
+            Ok(c) => return Ok((c, addr.to_string())),
+            Err(e) => {
+                warn(format!("中继连不上，换下一个: {addr}（{e:#}）"));
+                last = Some(e);
+            }
+        }
+    }
+    Err(match last {
+        Some(e) => e,
+        None => anyhow!("没有可用的中继地址"),
+    })
+}
+
+/// 把一串密文投进 `qid` 的队列，返回真正投成功的中继地址。
+///
+/// 注意这里**连接成功还要看 `put` 结果**：连上了但 `put` 回 `no_queue`，
+/// 说明那个中继上根本没有他的队列（队列是单实例本地的，不跨机器共享），
+/// 必须继续试下一个。这正是联系人记多个中继的用途。
+async fn put_first(relays: &[String], qid: &str, wires: &[Wire]) -> Result<String> {
+    let mut last: Option<anyhow::Error> = None;
+    for r in relays {
+        let addr = r.trim();
+        if addr.is_empty() {
+            continue;
+        }
+        let mut conn = match Conn::connect(addr).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn(format!("中继连不上，换下一个: {addr}（{e:#}）"));
+                last = Some(e);
+                continue;
+            }
+        };
+        let mut delivered = true;
+        for w in wires {
+            if let Err(e) = conn.put(qid, w).await {
+                warn(format!("投递失败，换下一个中继: {addr}（{e:#}）"));
+                last = Some(e);
+                delivered = false;
+                break;
+            }
+        }
+        if delivered {
+            return Ok(addr.to_string());
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("没有可用的中继地址")))
+}
+
+/// 把实际投成功的中继提到联系人列表首位，返回是否改动过。
+///
+/// 自愈：某次撞上死掉的首位中继、退到备用成功之后，下次直接从能用的那个开始，
+/// 不用每次都先撞一遍墙。只重排不增删——`relays` 的语义是
+/// "他的队列可能在这几个地方"，多留一个是资产。
+fn promote(relays: &mut Vec<String>, used: &str) -> bool {
+    let Some(pos) = relays.iter().position(|r| r.trim() == used) else {
+        return false;
+    };
+    if pos == 0 {
+        return false;
+    }
+    let r = relays.remove(pos);
+    relays.insert(0, r);
+    true
+}
+
+/// 投递成功后把中继顺序落到磁盘。写盘失败只告警：消息已经投出去了，
+/// 不该因为记不住"下次先试哪个"而让上层以为发送失败。
+fn promote_contact_relay(dir: &Path, dh: &str, used: &str) {
+    let Ok(mut cs) = load_contacts(dir) else {
+        return;
+    };
+    let Some(c) = cs.iter_mut().find(|c| c.dh == dh) else {
+        return;
+    };
+    if promote(&mut c.relays, used) {
+        let order = c.relays.clone();
+        if let Err(e) = save_contacts(dir, &cs) {
+            warn(format!("记录中继顺序失败（不影响已投递的消息）: {e:#}"));
+        } else {
+            warn(format!("该联系人改用中继 {used}，新顺序 {order:?}"));
+        }
+    }
+}
+
 /// 向当前中继索取一组临时 TURN 凭据（不读缓存）。
 ///
 /// 为什么要"按需索取"而不是写死在 App 里：
@@ -490,13 +592,13 @@ fn save_turn(dir: &Path, c: &TurnCreds) -> Result<()> {
 pub fn fetch_turn_creds(dir: &str) -> Result<TurnCreds> {
     let dir = PathBuf::from(dir);
     let me = load_self(&dir)?;
-    let relay = me
-        .relays
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow!("还没有配置中继，无法索取 TURN 凭据"))?;
+    if me.relays.is_empty() {
+        return Err(anyhow!("还没有配置中继，无法索取 TURN 凭据"));
+    }
+    // 凭据是"中继自己的 TURN"签发的，连上任何一个都能拿到可用的，所以这里可以换着试。
+    // 注意：不能把成功的中继提到 me.relays 首位——那里的首位有别的含义（见 a_recv_once）。
     let creds = rt().block_on(async {
-        let mut c = Conn::connect(&relay).await?;
+        let (mut c, _relay) = connect_first(&me.relays).await?;
         c.get_turn().await
     })?;
     save_turn(&dir, &creds)?;
@@ -793,19 +895,11 @@ pub fn send_batch(dir: &str, to: &str, kind: &str, bodies: &[String]) -> Result<
         wires.push(w);
     }
 
-    let relay = c
-        .relays
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow!("联系人没有可用的中继地址"))?;
-
-    rt().block_on(async {
-        let mut conn = Conn::connect(&relay).await?;
-        for w in &wires {
-            conn.put(&c.qid, w).await?;
-        }
-        Ok::<(), anyhow::Error>(())
-    })?;
+    if c.relays.is_empty() {
+        return Err(anyhow!("联系人没有可用的中继地址"));
+    }
+    let used = rt().block_on(put_first(&c.relays, &c.qid, &wires))?;
+    promote_contact_relay(&dir, &c.dh, &used);
 
     dev.save(&dir)?;
     Ok(ids)
@@ -839,17 +933,11 @@ fn send_kind(dir: &str, to: &str, kind: &str, text: &str, body: Option<&str>) ->
         },
     )?;
 
-    let relay = c
-        .relays
-        .first()
-        .cloned()
-        .ok_or_else(|| anyhow!("联系人没有可用的中继地址"))?;
-
-    rt().block_on(async {
-        let mut conn = Conn::connect(&relay).await?;
-        conn.put(&c.qid, &w).await?;
-        Ok::<(), anyhow::Error>(())
-    })?;
+    if c.relays.is_empty() {
+        return Err(anyhow!("联系人没有可用的中继地址"));
+    }
+    let used = rt().block_on(put_first(&c.relays, &c.qid, &[w]))?;
+    promote_contact_relay(&dir, &c.dh, &used);
 
     // 发送推进了棘轮，必须落盘
     dev.save(&dir)?;
@@ -1005,7 +1093,10 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
     let cs = load_contacts(&dir)?;
     let mut notified = 0usize;
     for c in &cs {
-        let Some(relay) = c.relays.first() else { continue };
+        // 没有中继记录的联系人推不到，跳过（不是错误）
+        if c.relays.is_empty() {
+            continue;
+        }
         let body = serde_json::json!({ "qid": new_qid, "relays": [url] }).to_string();
         let mid = proto::new_message_id();
         let w = match dev.encrypt(
@@ -1027,13 +1118,8 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
             // 某个联系人没有可用会话（比如刚被删过会话）：跳过，不阻断整体切换
             Err(_) => continue,
         };
-        let ok = rt()
-            .block_on(async {
-                let mut conn = Conn::connect(relay).await?;
-                conn.put(&c.qid, &w).await?;
-                Ok::<(), anyhow::Error>(())
-            })
-            .is_ok();
+        // 通知也要能容忍他那边中继挂了一个：只要有一个还认他的队列就够
+        let ok = rt().block_on(put_first(&c.relays, &c.qid, &[w])).is_ok();
         if ok {
             notified += 1;
         }
@@ -1090,7 +1176,20 @@ pub fn set_contact_alias(dir: &str, dh: &str, alias: &str) -> Result<Option<Stri
     Ok(out)
 }
 
-async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> {    let me = load_self(dir)?;
+/// 取一条消息。**收消息只能连"我的队列所在的那个中继"，不能换着试。**
+///
+/// 为什么这里不像发送那样遍历 `me.relays`：
+///
+/// 1. `me.relays` 的首位就是"我的队列在哪台"。队列是各中继实例本地的（不跨机器
+///    共享），`set_relay` 也是整表替换成 `[新地址]`，所以首位始终是队列所在处。
+/// 2. 中继的 `Sub` 对**不存在的队列是静默成功的**（只回 Ok，不补投任何积压）。
+///    于是"首位连不上就换下一个"会得到比失败更糟的结果：连接正常、订阅成功、
+///    永远收不到消息——界面上看起来完全在线。
+///
+/// 真要在中继之间迁移，只能走 `set_relay`：在新中继重建队列，再把新地址加密推给
+/// 所有联系人。那个动作会换 qid、会让对方重学路由，不能在一次网络抖动里自动做。
+async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> {
+    let me = load_self(dir)?;
     let qid = me
         .qid
         .clone()
@@ -1111,7 +1210,13 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
     let mut conn = match cached {
         Some((q, r, c)) if q == qid && r == relay => c,
         _ => {
-            let mut c = Conn::connect(&relay).await?;
+            // 连不上就说清楚"是哪台、为什么不能自动换"，否则用户只会看到一句没头没脑的
+            // "连接失败"，而真正要做的是在设置里迁移中继。
+            let mut c = Conn::connect(&relay).await.map_err(|e| {
+                anyhow!(
+                    "连不上你的中继 {relay}（收消息必须连这台，迁移中继会重建队列）: {e:#}"
+                )
+            })?;
             c.sub(&qid).await?;
             c
         }
