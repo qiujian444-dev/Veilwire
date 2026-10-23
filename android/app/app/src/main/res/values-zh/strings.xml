@@ -1,0 +1,434 @@
+<resources>
+    <!-- 中文系统下应用显示为「畅聊」；其余文案与 values/strings.xml 一一对应 -->
+    <string name="app_name">畅聊</string>
+
+    <!-- 通话界面 -->
+    <string name="call_unknown_contact">未知联系人</string>
+    <string name="call_ice_connecting">正在建立媒体通道（%1$s）</string>
+    <string name="call_reject">拒接</string>
+    <string name="call_accept">接听</string>
+    <string name="call_cancel">取消</string>
+    <string name="call_hangup">挂断</string>
+    <string name="call_close">关闭</string>
+    <string name="call_mute">静音</string>
+    <string name="call_muted">已静音</string>
+    <string name="call_speaker_on">免提开</string>
+    <string name="call_speaker_off">免提关</string>
+    <string name="call_reconnect">重连</string>
+    <string name="call_reconnecting">重连中</string>
+
+    <string name="call_state_incoming_video">视频通话呼入…</string>
+    <string name="call_state_incoming_voice">语音通话呼入…</string>
+    <string name="call_state_outgoing_video">正在呼叫（视频）…</string>
+    <string name="call_state_outgoing_voice">正在呼叫…</string>
+    <string name="call_state_resuming">正在恢复通话…</string>
+    <string name="call_state_connected">已接通，正在建立通道…</string>
+    <string name="call_state_ended">通话已结束</string>
+
+    <string name="call_end_declined">对方拒接</string>
+    <string name="call_end_busy">对方正在通话中</string>
+    <string name="call_end_no_answer">对方无应答</string>
+    <string name="call_end_missed">未接来电</string>
+    <string name="call_end_local_ended">你已挂断</string>
+    <string name="call_end_peer_ended">对方已挂断</string>
+    <string name="call_end_other">通话已结束（%1$s）</string>
+
+    <!-- 来电通知 -->
+    <string name="notif_call_channel">来电</string>
+    <string name="notif_call_channel_desc">有语音/视频通话呼入时提醒</string>
+    <string name="notif_call_someone">有人</string>
+    <string name="notif_call_kind_video">视频通话</string>
+    <string name="notif_call_kind_voice">语音通话</string>
+    <string name="notif_call_title">%1$s的%2$s</string>
+    <string name="notif_call_answer">点按接听</string>
+
+    <!-- 底部导航 -->
+    <string name="tab_chats">聊天</string>
+    <string name="tab_settings">设置</string>
+
+    <!-- 联系人列表 -->
+    <string name="chats_banner_service_off">没有在接收消息，别人发的你要等打开 App 才能看到</string>
+    <string name="chats_banner_start">开启</string>
+    <string name="chats_banner_battery">建议授予电池白名单，否则息屏后收不到消息</string>
+    <string name="chats_banner_grant">去授权</string>
+    <string name="chats_contacts">联系人</string>
+    <string name="chats_my_invite">我的邀请码</string>
+    <string name="chats_empty_title">还没有联系人</string>
+    <string name="chats_empty_hint">点右上角「我的邀请码」把你的邀请码发给对方；或点下面的「添加联系人」粘贴对方的邀请码。</string>
+    <string name="chats_unverified_header">未添加的联系人（点进去可以加为好友）</string>
+    <string name="chats_unverified_with_card">对方主动发来过消息 · 可加为好友</string>
+    <string name="chats_unverified_plain">对方主动发来过消息</string>
+    <string name="chats_no_messages">还没有消息</string>
+    <string name="chats_add_contact">＋ 添加联系人</string>
+
+    <!-- 联系人管理 -->
+    <string name="chats_manage_alias">设置备注名</string>
+    <string name="chats_manage_delete_chat">仅删除聊天记录</string>
+    <string name="chats_manage_delete_contact">删除联系人（含聊天记录）</string>
+    <string name="alias_title">备注名</string>
+    <string name="alias_label">备注（留空恢复对方昵称）</string>
+    <string name="alias_hint">备注只保存在本机，对方看不到；改备注不会影响聊天记录。</string>
+    <string name="alias_saved">备注已更新</string>
+    <string name="action_save">保存</string>
+    <string name="action_cancel">取消</string>
+    <string name="action_delete">删除</string>
+    <string name="action_done">完成</string>
+    <string name="action_ok">好</string>
+    <string name="delete_contact_title">删除联系人？</string>
+    <string name="delete_chat_title">删除聊天记录？</string>
+    <string name="delete_contact_body">将删除与「%1$s」的全部聊天记录、文件副本，并清除加密会话。\n\n删除后不可恢复；对方再发消息会重新以「陌生人」出现。</string>
+    <string name="delete_chat_body">只删除与「%1$s」的聊天记录和文件副本，联系人保留，之后还能正常收发。\n\n删除后不可恢复。</string>
+    <string name="delete_done">已删除</string>
+    <string name="delete_failed">删除失败</string>
+    <string name="dialog_notice">提示</string>
+
+    <!-- 我的邀请码 -->
+    <string name="invite_title">我的邀请码</string>
+    <string name="invite_hint">把它发给对方；对方添加你之后，你也要添加对方（双向都要加才能通信）。</string>
+    <string name="invite_generate">生成邀请码</string>
+    <string name="invite_regenerate">重新生成</string>
+    <string name="invite_copied">已复制到剪贴板。一个邀请码只能用一次，给下一个人要重新生成。</string>
+    <string name="invite_qr_desc">邀请码二维码</string>
+    <string name="invite_qr_hint">对方用「扫码添加」扫这个码</string>
+
+    <!-- 添加联系人 -->
+    <string name="add_title">添加联系人</string>
+    <string name="add_hint">扫码，或粘贴对方发来的邀请码</string>
+    <string name="add_scan_prompt">对准对方的邀请码二维码</string>
+    <string name="add_scan">📷 扫二维码</string>
+    <string name="add_adding">添加中…</string>
+    <string name="add_action">添加</string>
+
+    <!-- 引导：身份 -->
+    <string name="setup_tagline">无需手机号、无需注册。身份就是一对密钥，密钥在你手里。</string>
+    <string name="setup_nickname_label">昵称（只用于对方看到的名字）</string>
+    <string name="setup_phrase_label">粘贴 12 个恢复词（空格或换行分隔）</string>
+    <string name="setup_restore_hint">恢复的是身份本身。联系人要重新互加，但对方看到的还是原来的你。</string>
+    <string name="setup_err_phrase_failed">生成恢复短语失败</string>
+    <string name="setup_creating">创建中…</string>
+    <string name="setup_create">创建身份</string>
+    <string name="setup_have_phrase">已有恢复短语？恢复身份</string>
+    <string name="setup_restoring">恢复中…</string>
+    <string name="setup_restore">恢复身份</string>
+    <string name="setup_back_to_create">返回，创建新身份</string>
+
+    <!-- 引导：恢复短语 -->
+    <string name="phrase_title">抄写你的恢复短语</string>
+    <string name="phrase_hint">这 12 个词就是你的身份。删掉 App、换手机时，只有它能找回来。我们不会保存它，也没有任何「找回密码」。</string>
+    <string name="phrase_warning">请抄在纸上。截图、云笔记、输入法剪贴板都可能泄露。</string>
+    <string name="phrase_confirmed">我已经把 12 个词抄在纸上了</string>
+    <string name="phrase_continue">继续：选择中继</string>
+
+    <!-- 引导：中继 -->
+    <string name="relay_title">选择一个中继</string>
+    <string name="relay_hint">中继只负责转发加密包裹，看不到消息内容。它由社区或你自己搭建，官方不运营任何服务器。列表来自社区收录，不保证可用。</string>
+    <string name="relay_loading">正在获取中继列表…</string>
+    <string name="relay_empty_title">列表暂时拉不到</string>
+    <string name="relay_empty_hint">可能是网络原因，也可能社区还没有收录节点。如果朋友给你搭了中继，直接在下面输入地址即可。</string>
+    <string name="relay_region_unknown">地区未知</string>
+    <string name="relay_probing">测速中…</string>
+    <string name="relay_unreachable">不可达</string>
+    <string name="relay_custom_title">用自己的中继</string>
+    <string name="relay_custom_label">ws://192.168.1.10:8080 或 wss://relay.example.com</string>
+    <string name="relay_connecting">连接中…</string>
+    <string name="relay_use">使用这个地址</string>
+    <string name="relay_src_online">官方列表（在线）</string>
+    <string name="relay_src_cache">缓存列表</string>
+    <string name="relay_src_bundled">内置列表</string>
+    <string name="relay_src_none">没有可用列表</string>
+
+    <!-- 设置：身份 / 接收 / 电池 -->
+    <string name="settings_identity">我的身份</string>
+    <string name="settings_copied_id">已复制身份 ID</string>
+    <string name="settings_copy_id">复制 ID</string>
+    <string name="settings_id_hint">ID 不是账号、无法被搜索；删掉 App 或清数据后，凭恢复短语找回来。</string>
+    <string name="settings_view_phrase">查看恢复短语</string>
+    <string name="settings_receiving">接收消息</string>
+    <string name="settings_running">正在后台保持连接（运行 %1$d 分钟，重连 %2$d 次）</string>
+    <string name="settings_not_running">未运行，收不到任何消息</string>
+    <string name="action_stop">停止</string>
+    <string name="action_start">启动</string>
+    <string name="settings_battery_title">电池优化白名单</string>
+    <string name="settings_battery_ok">已授权，息屏后可以继续收消息</string>
+    <string name="settings_battery_missing">未授权。息屏后系统会切断网络，消息可能要等很久。这是 Android 的限制，不是软件的 bug。</string>
+    <string name="settings_oem_autostart">厂商自启动</string>
+
+    <!-- 设置：中继 -->
+    <string name="settings_relay_label">中继地址</string>
+    <string name="settings_relay_list">列表</string>
+    <string name="settings_relay_hint">中继由社区/用户自建。改完要点下面的保存。</string>
+    <string name="settings_saved">已保存</string>
+    <string name="settings_save">保存设置</string>
+    <string name="settings_switch_relay_title">切换中继？</string>
+    <string name="settings_switch_new_addr">新地址：%1$s</string>
+    <string name="settings_switch_body">切换后，你的收件队列和所有联系人的中继都会改到新地址。\n\n注意：旧中继上还没送达的消息**不会**迁移过来——对方重新发一次才收得到。\n\n对方也需要能连到这个中继，否则你们之间发不出消息。</string>
+    <string name="settings_switch_verifying">正在验证新中继…</string>
+    <string name="settings_switch_done">已切换中继</string>
+    <string name="settings_switch_failed">切换失败：%1$s</string>
+    <string name="settings_switch_action">切换</string>
+    <string name="settings_unknown_error">未知错误</string>
+    <string name="settings_foss_note">开源软件 · 官方不运营任何服务器</string>
+
+    <!-- 设置：通话网络（STUN / TURN） -->
+    <string name="ice_title">通话网络（STUN / TURN）</string>
+    <string name="action_collapse">收起</string>
+    <string name="action_expand">展开</string>
+    <string name="ice_hint">跨运营商/跨网段必须自建 TURN，否则只通信令、没有声音。</string>
+    <string name="ice_paste_label">粘贴 TURN 链接，如 turn://user:pass@1.2.3.4:3478</string>
+    <string name="ice_bad_format">看不懂这个格式。支持 turn://user:pass@host:port 或 host:port</string>
+    <string name="ice_filled">已填入：%1$s</string>
+    <string name="ice_parse_fill">解析并填入</string>
+    <string name="ice_probing">正在收集 ICE 候选（最多 12 秒）…</string>
+    <string name="ice_probe_timeout">（超时收尾，结果可能不全）</string>
+    <string name="ice_testing">测试中…</string>
+    <string name="ice_test">测试连通性</string>
+    <string name="ice_stun_label">STUN（留空用默认）</string>
+    <string name="ice_turn_label">TURN，例如 turn:1.2.3.4:3478</string>
+    <string name="ice_username">用户名</string>
+    <string name="ice_password">密码</string>
+    <string name="ice_err_not_init">WebRTC 还没初始化，进一次设置页再试</string>
+    <string name="ice_err_pc_failed">创建 PeerConnection 失败</string>
+    <string name="ice_ok_turn">✅ TURN 可用：拿到 %1$d 个中继候选，跨网段通话没问题</string>
+    <string name="ice_fail_turn">❌ TURN 没连上：STUN 是通的，但没拿到中继候选。检查地址/账号密码，以及服务器的 3478(udp) 有没有被防火墙挡住</string>
+    <string name="ice_only_stun">⚠️ 只走了 STUN：家用宽带大多能通，跨运营商/对称 NAT 仍会失败，建议配 TURN</string>
+    <string name="ice_only_host">⚠️ 只有内网候选：同一个 WiFi 能打，外网打不通（缺 STUN/TURN）</string>
+    <string name="ice_none">❌ 一个候选都没有：检查网络，或地址写错了</string>
+
+    <!-- 顶栏菜单 -->
+    <string name="menu_call_voice">语音通话</string>
+    <string name="menu_call_video">视频通话</string>
+    <string name="menu_safety">安全码</string>
+    <string name="menu_safety_verified">安全码（已核对）</string>
+    <string name="menu_panic">紧急清除</string>
+
+    <!-- 语音 / 录音 -->
+    <string name="mic_ok">现在按住麦克风就能说话了</string>
+    <string name="mic_denied">没有麦克风权限，发不了语音</string>
+    <string name="voice_too_short">说话时间太短</string>
+    <string name="voice_record_failed">录音失败（麦克风可能被别的程序占着）</string>
+    <string name="voice_empty">这段录音是空的，再试一次</string>
+    <string name="voice_busy_call">通话中不能录音</string>
+
+    <!-- 文件 -->
+    <string name="file_gone">文件不在这台手机上了</string>
+    <string name="file_save_failed">保存失败</string>
+    <string name="file_saved_to">已保存到 %1$s</string>
+    <string name="file_dir_download">下载/%1$s</string>
+    <string name="file_save_check_storage">保存失败，检查存储空间</string>
+    <string name="file_default_name">文件</string>
+    <string name="file_unreadable">读不到这个文件</string>
+    <string name="file_no_size">读不到文件大小，换一个文件试试</string>
+    <string name="file_too_big">文件超过 %1$dMB 上限</string>
+    <string name="file_open">打开</string>
+    <string name="file_save_again">再存一份到下载</string>
+    <string name="file_save_device">保存到手机</string>
+    <string name="file_save_as">另存为…</string>
+    <string name="file_already_at">已在 %1$s</string>
+    <string name="file_gone_hint">这个文件不在这台手机上了（旧版本发的消息没留副本）。让 ta 重发一次即可。</string>
+
+    <!-- 媒体 -->
+    <string name="media_image">图片</string>
+    <string name="image_process_failed">这张图处理失败</string>
+    <string name="video_unreadable">读不到这个视频</string>
+
+    <!-- 相机 -->
+    <string name="camera_no_photo">相机没有返回照片，再试一次</string>
+    <string name="camera_unreadable">读不到刚拍的照片</string>
+    <string name="camera_bad_provider">相机通道没配好（FileProvider）</string>
+    <string name="camera_no_app">这台设备没有可用的相机应用</string>
+    <string name="camera_perm_missing">没给相机权限，拍不了照；可以在系统设置里打开</string>
+
+    <!-- 消息操作 -->
+    <string name="resend_failed">重发失败</string>
+    <string name="recall_failed">撤回失败</string>
+    <string name="del_msgs_title">删除这 %1$d 条消息？</string>
+    <string name="del_msgs_body">只删除本机记录和文件副本，对方那边不受影响。删除后不可恢复。</string>
+    <string name="forward_title">转发 %1$d 条消息到</string>
+    <string name="forward_empty">还没有其他联系人可以转发</string>
+    <string name="forwarded_n">已转发 %1$d 条</string>
+    <string name="action_forward">转发</string>
+    <string name="action_copy">复制</string>
+    <string name="copied_n">已复制 %1$d 条</string>
+    <string name="copied_no_text">选中的消息里没有文字</string>
+    <string name="action_share">分享</string>
+
+    <!-- 聊天页 -->
+    <string name="chat_empty">还没有消息。发一条试试。</string>
+    <string name="stranger_add_hint">对方加了你，但还没在你的通讯录里。先加为联系人才能回复。</string>
+    <string name="stranger_no_clue">这条消息没带回信线索（可能是旧版本客户端发的），暂时没办法回复。让对方发一条新消息就行。</string>
+    <string name="stranger_add_reply">加为联系人并回复</string>
+    <string name="input_hint">输入消息</string>
+    <string name="action_send">发送</string>
+
+    <!-- 附件面板 -->
+    <string name="attach_camera">拍照</string>
+    <string name="attach_image">图片</string>
+    <string name="attach_video">视频</string>
+    <string name="attach_file">文件</string>
+    <string name="burn_title">阅后即焚</string>
+    <string name="burn_off">关</string>
+    <string name="burn_30s">30 秒</string>
+    <string name="burn_5m">5 分钟</string>
+    <string name="burn_hint">开启后，下一条消息在对方看过后自动消失（两边都删）。\n防不住截图和录屏。</string>
+
+    <!-- 多选模式 -->
+    <string name="sel_title_none">选择消息</string>
+    <string name="sel_title_n">已选 %1$d 条</string>
+
+    <!-- 恢复短语对话框 -->
+    <string name="phrase_dlg_title">恢复短语</string>
+    <string name="phrase_dlg_warn_identity">这 12 个词等于你的身份本体。任何人拿到它就能冒充你。</string>
+    <string name="phrase_dlg_warn_surveillance">请确认周围没有人、没有摄像头。</string>
+    <string name="phrase_dlg_copy">复制（抄到纸上后请清空剪贴板）</string>
+    <string name="phrase_dlg_loading">读取中…</string>
+    <string name="phrase_dlg_failed">读取失败</string>
+    <string name="phrase_dlg_show">显示</string>
+
+    <!-- 中继选择 -->
+    <string name="relay_pick_title">选择中继</string>
+    <string name="relay_pick_hint">来自社区收录，官方不背书、不保证可用。点一条即填入。</string>
+    <string name="relay_pick_empty">列表暂时拉不到，直接在下面输入地址。</string>
+    <string name="relay_pick_custom">自定义地址</string>
+    <string name="relay_pick_use">使用自定义地址</string>
+    <string name="action_close">关闭</string>
+
+    <!-- 气泡长按菜单 -->
+    <string name="menu_recall">撤回</string>
+    <string name="menu_multiselect">多选</string>
+    <string name="action_resend">重发</string>
+    <string name="toast_copied">已复制</string>
+    <string name="share_text_chooser">分享这段文字</string>
+
+    <!-- 紧急清除 -->
+    <string name="panic_title">紧急清除</string>
+    <string name="panic_body">会话暗号 %1$s（双方相同）。\n\n验证通过后将立即清除双方的聊天记录与文件（含已保存的副本），并清空中继上的存量消息。此操作不可恢复；身份和联系人保留，之后可以继续聊天。</string>
+    <string name="panic_answer_hint">填写得数</string>
+    <string name="panic_attempts_left">剩余尝试次数：%1$d</string>
+    <string name="panic_wrong">得数不对，换一题再试</string>
+    <string name="panic_confirm">清除</string>
+
+    <!-- 安全码 -->
+    <string name="safety_title">与 %1$s 的安全码</string>
+    <string name="safety_hint">当面或打电话，一行一行念过去。两边数字完全一样，才说明这条会话中间没有第三方。</string>
+    <string name="safety_no_key">还没拿到对方的身份公钥。等对方发一条消息过来，再回这里核对。</string>
+    <string name="safety_verified">✓ 已核对</string>
+    <string name="safety_copied">安全码已复制</string>
+    <string name="safety_unverify">取消核对</string>
+    <string name="safety_verify">我已核对</string>
+
+    <!-- 媒体气泡 -->
+    <string name="media_gone_video">这个视频不在这台手机上了</string>
+    <string name="media_gone_image">这张图不在这台手机上了</string>
+    <string name="media_kind_video">视频</string>
+    <string name="media_not_local">⚠ 不在本机</string>
+    <string name="media_loading">加载中…</string>
+
+    <!-- 文件气泡 -->
+    <string name="file_state_saved">已存下载</string>
+    <string name="file_state_open">点按打开</string>
+    <string name="file_state_absent">不在本机</string>
+
+    <!-- 语音气泡 -->
+    <string name="voice_gone">这条语音不在这台手机上了</string>
+    <string name="voice_play_during_call">通话中先别放语音</string>
+
+    <!-- 录音条 -->
+    <string name="rec_cancel_hint">松开 取消</string>
+    <string name="rec_send_hint">松开 发送 · 上滑 取消</string>
+
+    <!-- 发送进度 -->
+    <string name="tx_compress_image">正在压缩图片…</string>
+    <string name="tx_read_video">正在读取视频…</string>
+    <string name="tx_voice">发送语音  %1$d%%</string>
+    <string name="tx_image">发送图片  %1$d%%</string>
+    <string name="tx_video">发送视频  %1$d%%   %2$s / %3$s</string>
+    <string name="tx_file">发送 %1$s  %2$d%%   %3$s / %4$s</string>
+
+    <!-- 接收进度 -->
+    <string name="rx_voice">🎤 正在接收语音  %1$d%%</string>
+    <string name="rx_image">🖼 正在接收图片  %1$d%%</string>
+    <string name="rx_video">🎬 正在接收视频  %1$d%%   %2$s / %3$s</string>
+    <string name="rx_file">📄 正在接收 %1$s  %2$d%%   %3$s / %4$s</string>
+
+    <!-- 杂项 -->
+    <string name="file_no_app">没有能打开这种文件的应用，试试「另存为」</string>
+    <string name="media_gesture_hint">双指缩放 · 双击放大 · 点一下关闭</string>
+    <string name="qr_close">关闭扫码</string>
+
+    <!-- 会话列表预览 -->
+    <string name="preview_file_generic">📄 文件</string>
+    <string name="preview_file_named">📄 %1$s</string>
+    <string name="preview_voice">🎤 语音 %1$s</string>
+    <string name="preview_image">[图片]</string>
+    <string name="preview_video">[视频]</string>
+    <string name="preview_failed">%1$s（未发出）</string>
+    <string name="recall_note_mine">你撤回了一条消息</string>
+    <string name="recall_note_peer">对方撤回了一条消息</string>
+
+    <!-- 日期格式（SimpleDateFormat 模板，随语言变） -->
+    <string name="ts_fmt_day">M月d日 HH:mm</string>
+    <string name="ts_fmt_time">HH:mm</string>
+    <string name="media_too_big">这条视频 %1$s，超过 %2$dMB 的通道上限。先在相册里裁到十几秒（或降低画质）再发。</string>
+
+    <!-- 陌生人（未加为联系人）命名 -->
+    <string name="stranger_prefix">陌生人 %1$s</string>
+    <string name="unknown_contact">未知联系人</string>
+
+    <!-- 分享选择器 -->
+    <string name="share_file_chooser">发送到</string>
+
+    <!-- 数据层错误（kind → 文案的映射在 UiErrors.kt） -->
+    <string name="err_relay_not_set">请先在设置里填中继地址</string>
+    <string name="err_relay_or_identity_missing">还没配置中继或身份</string>
+    <string name="err_resend_too_old">这条消息太老，没有可重发的记录</string>
+    <string name="err_recall_not_outgoing">只能撤回自己发的消息</string>
+    <string name="err_recall_no_rid">这条消息不能撤回</string>
+    <string name="err_recall_window_passed">发出超过 10 分钟，撤不回了</string>
+    <string name="err_recall_failed">撤回失败</string>
+    <string name="err_forward_no_file">没有可转发的消息（文件副本可能已不在本机）</string>
+    <string name="err_file_empty">空文件不用发</string>
+    <string name="err_file_too_big">文件超过 %1$dMB 上限，暂不支持</string>
+    <string name="err_file_send_failed">发送失败：%1$s</string>
+    <string name="err_img_size_unknown">读不到这张图</string>
+    <string name="err_img_unreadable">这张图解不开（可能是 HEIC 之类不支持的格式），换一张试试</string>
+    <string name="err_img_pixels_too_many">这张图的像素太多（%1$s），换一张试试</string>
+    <string name="err_img_decode_failed">这张图解不开（内存不足或格式不支持），换一张试试</string>
+    <string name="err_img_compress_failed">压缩这张图失败，换一张试试</string>
+    <string name="err_img_still_too_big">这张图压完还有 %1$s，太大了</string>
+    <string name="err_video_size_unknown">读不到这个视频的大小，换一个试试</string>
+    <string name="err_video_unreadable">这个视频读不出来（编码可能不受支持），换一个试试</string>
+    <string name="err_rec_already">已经在录音了</string>
+    <string name="err_rec_open_failed">录音打不开：%1$s</string>
+    <string name="err_add_no_clue">没有对方的回信线索（可能是旧版本客户端发的）。让对方再发一条消息就行。</string>
+    <string name="err_add_failed">添加失败</string>
+    <string name="err_unknown">未知错误</string>
+    <string name="err_core">操作失败</string>
+    <string name="err_core_detail">操作失败：%1$s</string>
+
+    <!-- 通话记录（持久化的是结构化 JSON，渲染在这里按语言拼） -->
+    <string name="calllog_declined_me">已拒接来电</string>
+    <string name="calllog_no_answer_me">无人接听</string>
+    <string name="calllog_ongoing">通话 %1$s</string>
+    <string name="calllog_cancelled">已取消</string>
+    <string name="calllog_ended">通话结束</string>
+
+    <!-- 消息服务的通知 -->
+    <string name="msg_svc_channel">保持连接</string>
+    <string name="msg_svc_channel_desc">保持连接以接收消息</string>
+    <string name="msg_svc_title">正在接收消息</string>
+    <string name="msg_svc_text_ok">长连接已建立</string>
+    <string name="msg_svc_text_battery">建议授予电池白名单，否则息屏后会断</string>
+    <string name="msg_channel">新消息</string>
+    <string name="msg_channel_desc">收到新消息时提醒（含提示音与震动）</string>
+    <string name="notif_new_message">新消息</string>
+    <string name="notif_burn_body">阅后即焚消息，打开查看（过后自动消失）</string>
+    <string name="notif_blob_body">发来了一个附件</string>
+
+    <string name="err_call_mic_failed">无法打开麦克风</string>
+    <string name="err_call_build_failed">建立通话失败</string>
+    <string name="err_call_step_failed">建立通话失败：%1$s</string>
+    <string name="err_call_renegotiate_failed">重协商失败：%1$s</string>
+    <string name="err_call_reconnect_failed">重连失败：%1$s</string>
+    <string name="err_call_negotiate_failed">协商失败：%1$s</string>
+    <string name="err_call_network_down">网络不通，无法建立媒体通道</string>
+</resources>

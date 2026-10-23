@@ -1,0 +1,19 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "命令行客户端：在没有 Android 端的情况下端到端验证整条链路"
+
+[dependencies]
+proto = { path = "../proto" }
+identity = { path = "../identity" }
+secure = { path = "../secure" }
+client = { path = "../client" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+base64 = "0.22"

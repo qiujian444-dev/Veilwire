@@ -1,0 +1,25 @@
+[package]
+name = "relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "阶段 0 · 0.2 验证：无标识队列中继 + 长连接稳定性压测"
+
+[dependencies]
+proto = { path = "../proto" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+base64 = "0.22"
+# TURN：长凭证 key = MD5(user:realm:pass)，MESSAGE-INTEGRITY = HMAC-SHA1，FINGERPRINT = CRC32
+md-5 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+crc32fast = "1.5"
+
+# 集成测试（tests/instant_recv.rs）用 client 走真实收发链路
+[dev-dependencies]
+client = { path = "../client" }

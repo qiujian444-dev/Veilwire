@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/proto",
+    "crates/identity",
+    "crates/secure",
+    "crates/relay",
+    "crates/punch",
+    "crates/cli",
+    "crates/client",
+    "crates/android-jni",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.AnonChat" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- 启动第一帧的底色。不设的话是纯白，切到灰底聊天页会闪一下 -->
+        <item name="android:windowBackground">@color/window_bg</item>
+    </style>
+</resources>

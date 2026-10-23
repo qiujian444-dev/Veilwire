@@ -1,0 +1,15 @@
+[package]
+name = "android-jni"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Android JNI 桥：把 client 的同步 API 暴露给 Kotlin"
+
+[lib]
+name = "anonchat"
+crate-type = ["cdylib"]
+
+[dependencies]
+client = { path = "../client" }
+jni = "0.21"
+serde_json.workspace = true

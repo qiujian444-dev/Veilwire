@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  系统设置里的「应用语言」列表（Android 13+ 读取这个文件）。
+  没有它，用户只能靠改整个系统语言来切换，不能单独给本应用指定语言。
+-->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en" />
+    <locale android:name="zh-CN" />
+</locale-config>

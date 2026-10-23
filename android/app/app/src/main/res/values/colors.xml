@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      窗口底色要和聊天页的消息区一致（#EDEDED）。
+      不一致的话，冷启动的第几帧、以及系统导航栏露出来的那一条会是纯白，
+      深色模式下更明显 —— 会看到一条刺眼的白边。
+    -->
+    <color name="window_bg">#EDEDED</color>
+    <!-- 启动图标 adaptive background：白底（与图标源图一致） -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+</resources>

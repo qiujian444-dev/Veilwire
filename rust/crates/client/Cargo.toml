@@ -1,0 +1,17 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "客户端业务层（同步 API）：CLI 与 Android JNI 共用同一套实现"
+
+[dependencies]
+proto = { path = "../proto" }
+identity = { path = "../identity" }
+secure = { path = "../secure" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }

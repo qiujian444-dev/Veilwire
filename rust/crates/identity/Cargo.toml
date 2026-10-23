@@ -1,0 +1,16 @@
+[package]
+name = "identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "身份密钥与邀请码：Ed25519 身份、无账号 ID、一次性邀请"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+getrandom = "0.2"
+
+[dev-dependencies]
+proto = { path = "../proto" }

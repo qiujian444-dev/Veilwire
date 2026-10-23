@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 暴露路径：只开放"已接收文件"和"刚拍的照片"两个目录，绝不能用根路径 -->
+<paths>
+    <files-path name="inbox" path="inbox/" />
+    <!-- 拍照原图的落地目录：相机应用通过这个 URI 往里写，压完即删 -->
+    <cache-path name="shots" path="shots/" />
+</paths>

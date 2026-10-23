@@ -1,0 +1,1412 @@
+package io.anonchat.app
+
+import android.content.Context
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import io.anonchat.core.Native
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+data class Contact(
+    val name: String,
+    val pk: String,
+    val dh: String,
+    val qid: String,
+    /** 本机备注名（只在本人设备上生效）。空串 = 用对方自己的昵称 */
+    val alias: String = "",
+) {
+    /** 界面上该显示的名字：备注优先 */
+    val display: String get() = alias.ifBlank { name }
+}
+
+data class Msg(
+    val text: String,
+    val ts: Long,
+    val outgoing: Boolean,
+    /**
+     * "text" 普通消息；"call" 通话记录（居中灰字，不算未读）；
+     * "file" 文件；"voice" 语音；"image" 图片；"video" 视频。
+     *
+     * 后四种的 text 字段都是一段 JSON 摘要——它们走的是同一条分块传输链路，
+     * 区别只在 kind（决定气泡长什么样）和摘要里多出来的 dur / w / h。
+     */
+    val kind: String = "text",
+    /**
+     * 本地消息 id（MsgStore 分配，只在本机有意义）。
+     * 重发成功回填状态、将来做删除/转发都靠它定位到具体某一行。
+     */
+    val id: Long = 0,
+    /**
+     * 发送失败（目前只有文字消息会落到这个状态）。
+     * 文件/语音/图片发送失败根本不落记录，直接弹错误——它们的来源
+     * （相册/文档）可能已经不在，没有"重发"可谈。
+     */
+    val failed: Boolean = false,
+    /**
+     * 撤回引用：发送方生成、随消息传输，两边设备一致（详见 Recall.kt）。
+     * 文字消息来自加密载荷的 id；文件类消息就是分块摘要里的 fid。
+     * 空串 = 不可撤回（发送失败的、太老的没带 rid 的消息）。
+     */
+    val rid: String = "",
+    /**
+     * 阅后即焚档位（秒）。0 = 普通消息。
+     * 双端各自首次展示时记 seenAt（见下），到期后本地删除。
+     */
+    val burn: Long = 0,
+    /**
+     * 首次展示的本地时间戳（秒）。0 = 还没展示过、计时未开始。
+     * 必须落盘：App 被杀期间倒计时不能凭空重来，回放时读出来继续算。
+     */
+    val seenAt: Long = 0,
+) {
+    /**
+     * 会话列表里那一行预览的**结构**（不是文案）。
+     *
+     * 文件/语音消息的 text 是一段 JSON 概要，直接拿去当预览会在列表上显示
+     * `{"fid":"77f49602","name":"big20.bin",...}` —— 模拟器验收时抓到的。
+     *
+     * 为什么不给现成字符串：预览是显示文案，必须随系统语言变。数据层不该
+     * 拼好中文再塞给界面（那等于把语言写死在存储层）。这里只给"是什么类型的
+     * 消息 + 必要参数"，具体句子由 UI 层按当前语言生成（见 MainActivity.previewText）。
+     */
+    val preview: Preview
+        get() {
+            val base = when (kind) {
+                "recall" -> Preview.Recall(byMe = outgoing)
+                "file" -> {
+                    val n = runCatching { JSONObject(text).optString("name") }.getOrDefault("")
+                    Preview.File(name = n)
+                }
+                "voice" -> Preview.Voice(durMs = Voice.parse(text)?.durMs ?: 0L)
+                "image" -> Preview.Image()
+                "video" -> Preview.Video()
+                else -> Preview.Text(text)
+            }
+            // "未发出"是显示层的后缀，不是消息本身的一部分
+            if (!failed || !outgoing) return base
+            return when (base) {
+                is Preview.Text -> base.copy(failed = true)
+                is Preview.File -> base.copy(failed = true)
+                is Preview.Voice -> base.copy(failed = true)
+                is Preview.Image -> base.copy(failed = true)
+                is Preview.Video -> base.copy(failed = true)
+                is Preview.Recall -> base.copy(failed = true)
+            }
+        }
+}
+
+/**
+ * 会话列表预览的结构化描述。
+ *
+ * [failed] 单独拎出来：它只是给预览加个后缀，不改变消息类型。
+ */
+sealed interface Preview {
+    val failed: Boolean get() = false
+
+    /** 普通文字消息 */
+    data class Text(val text: String, override val failed: Boolean = false) : Preview
+
+    /** 文件消息。[name] 为空表示对方没给文件名 */
+    data class File(val name: String, override val failed: Boolean = false) : Preview
+
+    /** 语音消息 */
+    data class Voice(val durMs: Long, override val failed: Boolean = false) : Preview
+
+    /** 图片（没有可变化的字段，所以用 object） */
+    data class Image(override val failed: Boolean = false) : Preview
+
+    /** 视频 */
+    data class Video(override val failed: Boolean = false) : Preview
+
+    /** 撤回提示。[byMe] = 是我撤的 */
+    data class Recall(val byMe: Boolean, override val failed: Boolean = false) : Preview
+}
+
+data class Incoming(
+    val fromName: String?,
+    val fromId: String,
+    val text: String,
+    val ts: Long,
+    val dh: String,
+    val kind: String = "text",
+    val body: String? = null,
+    val msgId: String = "",
+    /** 发送方载荷里的消息 id，撤回引用用（详见 Recall.kt） */
+    val rid: String = "",
+    /** 阅后即焚档位（秒）。文字消息从 body 解析；0 = 普通消息 */
+    val burn: Long = 0,
+    /** 对方自报的显示名。陌生人会话里这是唯一能显示给人看的称呼 */
+    val selfName: String? = null,
+    /** 回信要投到对方的哪个队列 */
+    val replyQid: String? = null,
+    /** 回信可用的中继候选（投递中继 + 对方自报的中继） */
+    val replyRelays: List<String> = emptyList(),
+) {
+    val isText get() = kind == "text"
+    val isCall get() = kind.startsWith("call.")
+    val isFile get() = kind == "file"
+
+    /** 语音走的是同一套分块链路，只有 kind 和摘要字段多一个 dur 的区别 */
+    val isVoice get() = kind == "voice"
+
+    /** 图片、视频：同样是分块链路，摘要里多了 w/h（视频还有 dur） */
+    val isImage get() = kind == "image"
+    val isVideo get() = kind == "video"
+
+    /** 凡是"拆成多块传、收齐才落一条气泡"的消息 */
+    val isBlob get() = isFile || isVoice || isImage || isVideo
+
+    /** 对方有没有留下足够线索让我回过去（老版本客户端不带） */
+    val canReply get() = !replyQid.isNullOrBlank() && replyRelays.isNotEmpty()
+}
+
+/**
+ * 陌生人的"回信名片"。
+ *
+ * 为什么必须存下来：这条信息只存在于收到消息的那一刻——载荷里带的一次性线索，
+ * 消息落盘后就不再有了。不记住它，用户点"加为联系人"时只能干瞪眼等对方再发一条。
+ *
+ * 信任边界：只有 [dh] 是可信的（加密层确认过身份），其余字段都是对方自报的。
+ */
+data class PeerCard(
+    val name: String,
+    val pk: String,
+    val dh: String,
+    val qid: String,
+    val relays: List<String>,
+    /**
+     * 用户是否当面核对过安全码。
+     *
+     * 存这个而不是"重新算一遍没问题"：核对是一次社交行为，机器无从判断。
+     * 只有用户点过"我已核对"才算数，所以它是**用户声明的状态**，
+     * 一旦对方换了身份公钥（安全码变了），这个标记必须自动作废。
+     */
+    val verified: Boolean = false,
+    /** 核对时的安全码。用来发现"对方换身份了、我之前核对的已经不是这个人" */
+    val verifiedCode: String = "",
+)
+
+/** Rust 侧通话状态机交回的事件 */
+data class CallEvent(
+    val state: String,
+    val callId: String,
+    val peerDh: String,
+    val video: Boolean,
+    val reason: String,
+    val remoteSdp: String?,
+    val iceCandidate: String?,
+    val iceMid: String,
+    val iceMline: Int,
+    /** 正在重新协商（对端换网络，通话没断） */
+    val renegotiating: Boolean = false,
+)
+
+/**
+ * 结果包装：拿 data 或看 error。
+ *
+ * 必须是 data class —— 调用点用 `val (data, err) = ...` 解构，
+ * 普通 class 不会生成 componentN()。
+ */
+/**
+ * 操作结果。
+ *
+ * [error] 是 Rust 核心转发的**技术信息**（不本地化，日志/调试用）；
+ * [err] 是应用层结构化错误，文案由 UI 层按当前语言生成（见 MainActivity.errText）。
+ * 两者一般只会有一个：核心转发走 error，应用自身的校验失败走 err。
+ */
+data class Res<T>(val data: T?, val error: String? = null, val err: AppError? = null) {
+    val ok get() = error == null && err == null
+}
+
+/**
+ * 应用侧的数据层。
+ *
+ * 所有加密/协议相关的事都在 Rust 里，这里只负责：
+ * - 拼参数、解信封
+ * - 消息历史（明文，仅供 UI 展示用；真正的密钥材料在 filesDir/device 下）
+ */
+object Repo {
+    private var ready = false
+    private lateinit var deviceDir: File
+
+    /**
+     * 保存到「下载」目录要用 ContentResolver，得留个 ApplicationContext。
+     * 只用于 FileSaver，别拿它干别的事（尤其别存到能活过进程的静态变量里做 UI 操作）。
+     */
+    private lateinit var appCtx: Context
+
+    var relay: String = ""
+        private set
+
+    /** 消息历史（append-only 日志，自带同步）。见 [MsgStore] 为什么不再整文件重写 */
+    private lateinit var store: MsgStore
+
+    /**
+     * 未读/名片表的读写锁：写发生在收消息的 IO 线程，读主要在 UI 线程
+     * （Compose 重组时实时刷新会频繁读）。不加锁的话并发迭代会偶发
+     * ConcurrentModificationException，而且这种崩溃只在"正在看聊天页时
+     * 恰好来消息"出现，极难复现。
+     *
+     * 消息历史本身由 [MsgStore] 内部同步，不再用这把锁。
+     */
+    private val msgLock = Any()
+
+    /** 未读数：who → 条数。正开着这个会话（前台）时不计数 */
+    private val unread = HashMap<String, Int>()
+
+    fun markUnread(who: String) {
+        if (MainActivity.resumed && MainActivity.openPeer == who) return
+        synchronized(msgLock) { unread[who] = (unread[who] ?: 0) + 1 }
+    }
+
+    fun clearUnread(who: String) {
+        synchronized(msgLock) { unread.remove(who) }
+    }
+
+    fun unreadOf(who: String): Int = synchronized(msgLock) { unread[who] ?: 0 }
+
+    fun totalUnread(): Int = synchronized(msgLock) { unread.values.sum() }
+
+    /**
+     * 初始化。**幂等**：Activity、前台服务、开机接收器都可能调用它。
+     *
+     * 幂等很重要：进程被系统杀掉后，START_STICKY 会让服务自己重启，
+     * 此时 Activity 的 onCreate 根本没跑过。如果这里依赖"先调 init"，
+     * 服务就会拿着未初始化的路径去收消息，表现为"服务在跑但收不到任何东西"。
+     */
+    fun init(ctx: Context) {
+        if (ready) return
+        appCtx = ctx.applicationContext
+        deviceDir = File(ctx.filesDir, "device")
+        store = MsgStore(ctx.filesDir)
+        cardFile = File(ctx.filesDir, "peer_cards.json")
+        relay = ctx.getSharedPreferences("anon", Context.MODE_PRIVATE)
+            .getString("relay", "") ?: ""
+        // 载入历史（顺便把老版本 messages.json 迁过来）；压缩放到后台，
+        // 别让它拖慢冷启动——它只在日志膨胀时才真干活。
+        store.load()
+        // 0.12.0 起会话键从"显示名"改成 dh。这里做一次性迁移：
+        // 旧日志里 `w` 是名字，靠联系人表 + 陌生人来信卡片（都带 dh）反查。
+        // 找不到映射的（比如对方卡片也没了）保留原名，不丢数据。
+        runCatching { migrateConversationKeys() }
+        Thread { runCatching { store.compactIfNeeded() } }.start()
+        // 启动清扫：被杀期间到期的焚毁消息，回来第一件事就是删掉
+        Thread { runCatching { sweepExpired() } }.start()
+        loadCards()
+        ready = true
+    }
+
+    /** 名字 → dh 的映射，用于把旧会话键迁移过来 */
+    private fun migrateConversationKeys() {
+        val map = HashMap<String, String>()
+        runCatching { contacts() }.getOrDefault(emptyList()).forEach { c ->
+            if (c.name.isNotBlank() && c.dh.isNotBlank()) map[c.name] = c.dh
+        }
+        synchronized(msgLock) {
+            peerCards.forEach { (k, card) ->
+                if (card.dh.isNotBlank()) {
+                    map[k] = card.dh
+                    if (card.name.isNotBlank()) map[card.name] = card.dh
+                }
+            }
+        }
+        val n = store.migrateKeysToDh(map)
+        if (n > 0) android.util.Log.i("AnonChat", "conversation keys migrated to dh: $n")
+    }
+
+    /** 通话用的 ICE 服务器配置，都在 SharedPreferences 里 */
+    fun iceConfig(ctx: Context): Map<String, String> {
+        val p = ctx.getSharedPreferences("anon", Context.MODE_PRIVATE)
+        return mapOf(
+            "stun" to (p.getString("stun", "") ?: ""),
+            "turn" to (p.getString("turn", "") ?: ""),
+            "turn_user" to (p.getString("turn_user", "") ?: ""),
+            "turn_pass" to (p.getString("turn_pass", "") ?: ""),
+        )
+    }
+
+    fun setIceConfig(ctx: Context, stun: String, turn: String, user: String, pass: String) {
+        ctx.getSharedPreferences("anon", Context.MODE_PRIVATE).edit()
+            .putString("stun", stun.trim())
+            .putString("turn", turn.trim())
+            .putString("turn_user", user.trim())
+            .putString("turn_pass", pass.trim())
+            .apply()
+    }
+
+    /**
+     * 切换中继地址。
+     *
+     * **必须走 Rust**：中继地址在磁盘上有三份（self.json 的 relays、
+     * 每个联系人的 relays、App 的 SharedPreferences）。只改 SP 的话消息仍按
+     * 联系人的旧地址投，表现为"显示已保存但怎么都不通"——2026-10-22 实测踩到，
+     * 当时只能清数据重装。Rust 侧会先验证新中继可达再落盘。
+     *
+     * 旧中继队列里未 ack 的消息**不会迁移**，调用方需要先向用户确认。
+     */
+    fun setRelay(ctx: Context, url: String): Res<Int> {
+        val (d, e) = envelope(Native.setRelay(dir, url.trim()))
+        if (e == null) {
+            relay = url.trim()
+            ctx.getSharedPreferences("anon", Context.MODE_PRIVATE)
+                .edit().putString("relay", relay).apply()
+        }
+        return Res((d as? Number)?.toInt(), e)
+    }
+
+    /** 删除联系人：Rust 侧删 contacts 条目 + Olm 会话；会话记录与文件副本由调用方另行清理 */
+    fun removeContact(dh: String): Res<Unit> {
+        val (_, e) = envelope(Native.removeContact(dir, dh))
+        return Res(if (e == null) Unit else null, e)
+    }
+
+    /** 设置备注名（空串清除） */
+    fun setAlias(dh: String, alias: String): Res<String?> {
+        val (d, e) = envelope(Native.setContactAlias(dir, dh, alias))
+        return Res(d as? String, e)
+    }
+
+    /**
+     * 只删聊天记录（保留联系人）：消息 + 该会话的文件副本 + 陌生人来信卡片。
+     * 返回删掉的消息条数。
+     */
+    fun deleteConversation(key: String): Int {
+        val msgs = store.slice(key, 0, Int.MAX_VALUE)
+        msgs.forEach { m -> deleteBlobFiles(m) }
+        val n = synchronized(msgLock) { store.dropConversation(key) }
+        synchronized(msgLock) { peerCards.remove(key) }
+        saveCards()
+        return n
+    }
+
+    /**
+     * 删除联系人（连带聊天记录与文件）。
+     *
+     * 顺序：先删联系人（Rust 侧同时清 Olm 会话），再删本地记录。
+     * 反过来的话，如果 Rust 删失败，本地记录已经没了但联系人还在——
+     * 用户会看到"联系人还在但记录空了"，比失败更困惑。
+     */
+    fun deleteContact(dh: String): Res<Int> {
+        val r = removeContact(dh)
+        if (!r.ok) return Res(null, r.error)
+        val n = deleteConversation(dh)
+        return Res(n, null)
+    }
+
+    /**
+     * 本地删除消息（只清自己这边，不通知对方）。
+     * 与「撤回」的区别：撤回会发指令让对方也删；删除只影响本机记录与文件副本。
+     */
+    fun deleteMessages(who: String, ids: Collection<Long>): Int {
+        if (ids.isEmpty()) return 0
+        val msgs = store.slice(who, 0, Int.MAX_VALUE).filter { it.id in ids }
+        msgs.forEach { deleteBlobFiles(it) }
+        return store.deleteMany(who, ids)
+    }
+
+    /**
+     * 转发消息到另一个会话：文本原样发，文件类按本机副本重发。
+     * 返回 (成功条数, 跳过条数)——文件副本不在本机的会被跳过（旧版本消息没留副本）。
+     */
+    fun forward(to: String, msgs: List<Msg>): Res<Pair<Int, Int>> {
+        var ok = 0
+        var skip = 0
+        for (m in msgs) {
+            when {
+                m.kind == "text" -> {
+                    if (send(to, m.text).ok) ok++ else skip++
+                }
+                m.kind in setOf("file", "voice", "image", "video") -> {
+                    val v = runCatching { JSONObject(m.text) }.getOrNull()
+                    val p = v?.optString("path")?.takeIf { it.isNotBlank() }
+                    val f = p?.let { File(it) }
+                    if (f == null || !f.exists()) {
+                        skip++
+                        continue
+                    }
+                    val r = sendFile(
+                        to = to,
+                        name = v?.optString("name") ?: f.name,
+                        size = f.length(),
+                        open = { f.inputStream() },
+                        kind = m.kind,
+                        durMs = v?.optLong("dur", 0) ?: 0,
+                        width = v?.optInt("w", 0) ?: 0,
+                        height = v?.optInt("h", 0) ?: 0,
+                    )
+                    if (r.ok) ok++ else skip++
+                }
+                // 通话记录、撤回灰字没有转发意义
+                else -> skip++
+            }
+        }
+        return Res(
+            ok to skip,
+            err = if (ok == 0) AppError(ErrKind.FORWARD_NO_FILE) else null
+        )
+    }
+
+    val dir: String get() = deviceDir.absolutePath
+
+    fun hasIdentity(): Boolean = File(deviceDir, "device.key").exists()
+
+    // ---------------------------------------------------------------- 身份
+
+    fun createIdentity(name: String?): Res<String> {
+        val (d, e) = envelope(Native.init(dir, name))
+        if (e == null) ensureQueue()   // 有中继就顺手建收件队列
+        return Res(d as? String, e)
+    }
+
+    fun identity(): String? {
+        val (d, _) = envelope(Native.identity(dir))
+        return d as? String
+    }
+
+    fun invite(): Res<String> {
+        if (relay.isBlank()) return Res(null, err = AppError(ErrKind.RELAY_NOT_SET))
+        val (d, e) = envelope(Native.invite(dir, relay))
+        return Res(d as? String, e)
+    }
+
+    fun add(code: String, alias: String?): Res<String> {
+        val (d, e) = envelope(Native.add(dir, code.trim(), alias))
+        if (e == null) ensureQueue()
+        return Res(d as? String, e)
+    }
+
+    /**
+     * 确保自己有收件队列。失败不致命：离线加好友/离线启动都该照常工作，
+     * 下次启动或下次加好友会再试。
+     */
+    fun ensureQueue(): Res<String> {
+        if (relay.isBlank() || !hasIdentity()) {
+            return Res(null, err = AppError(ErrKind.RELAY_OR_IDENTITY_MISSING))
+        }
+        val (d, e) = envelope(Native.ensureQueue(dir, relay))
+        return Res(d as? String, e)
+    }
+
+    fun contacts(): List<Contact> {
+        val (d, _) = envelope(Native.contacts(dir))
+        if (d !is JSONArray) return emptyList()
+        return (0 until d.length()).mapNotNull { i ->
+            val o = d.optJSONObject(i) ?: return@mapNotNull null
+            Contact(
+                name = o.optString("name"),
+                pk = o.optString("pk"),
+                dh = o.optString("dh"),
+                qid = o.optString("qid"),
+                alias = o.optString("alias"),
+            )
+        }
+    }
+
+    fun selfName(): String? {
+        val (d, _) = envelope(Native.selfName(dir))
+        return d as? String
+    }
+
+    /** 恢复短语（12 个词）。调用方负责先警告用户 */
+    fun backupPhrase(): Res<String> {
+        val (d, e) = envelope(Native.backupPhrase(dir))
+        return Res(d as? String, e)
+    }
+
+    fun restore(phrase: String, name: String?): Res<String> {
+        val (d, e) = envelope(Native.restore(dir, phrase, name))
+        return Res(d as? String, e)
+    }
+
+    /** 中继探测：WS 握手耗时（毫秒）。失败返回 error */
+    fun relayProbe(url: String): Res<Long> {
+        val (d, e) = envelope(Native.relayProbe(url))
+        return Res(d as? Long, e)
+    }
+
+    fun selfQueue(): String? {
+        val (d, _) = envelope(Native.selfQueue(dir))
+        return d as? String
+    }
+
+    // ---------------------------------------------------------------- 收发
+
+    /**
+     * 发一条文字消息。
+     *
+     * **失败也要落记录**（failed=true）：之前只在成功时落盘，失败只在输入栏上方
+     * 提示 4 秒——消息直接消失，用户根本不知道对方没收到。现在失败的消息留在
+     * 列表里，气泡带红色感叹号，点一下就能重发。
+     *
+     * 成功时 Rust 返回载荷 ID（rid）：撤回功能靠它，存进 Msg 两边才能对上。
+     * [burn] > 0 时是阅后即焚消息（走 sendBurn，参数随密文传输）。
+     */
+    fun send(to: String, text: String, burn: Long = 0): Res<Unit> {
+        val (d, e) = if (burn > 0) {
+            envelope(Native.sendBurn(dir, to, text, burn))
+        } else {
+            envelope(Native.send(dir, to, text))
+        }
+        val now = System.currentTimeMillis() / 1000
+        if (e == null) {
+            append(to, Msg(text, now, outgoing = true, rid = d as? String ?: "", burn = burn))
+        } else {
+            append(to, Msg(text, now, outgoing = true, failed = true))
+        }
+        return Res(if (e == null) Unit else null, e)
+    }
+
+    /**
+     * 重发一条失败的消息。
+     *
+     * 成功后**删掉失败那条、在末尾追加一条新的**（带新 rid）而不是原位回填：
+     * 重发是第二次传输，对方收到的是新载荷新 id，原位的旧记录留着 rid 也是空的，
+     * 撤回时对不上。排到末尾和微信"重发"的观感一致。
+     */
+    fun resend(who: String, m: Msg): Res<Unit> {
+        if (!m.failed) return Res(Unit, null)
+        if (m.id == 0L) return Res(null, err = AppError(ErrKind.RESEND_TOO_OLD))
+        val (d, e) = envelope(Native.send(dir, who, m.text))
+        if (e != null) return Res(null, e)
+        store.deleteById(who, m.id)
+        append(
+            who,
+            Msg(m.text, System.currentTimeMillis() / 1000, outgoing = true, rid = d as? String ?: "")
+        )
+        return Res(Unit, null)
+    }
+
+    // ---------------------------------------------------------------- 撤回
+
+    /** 这条消息现在能不能撤回（UI 用）：自己发的、带 rid、在 10 分钟窗口内 */
+    fun canRecall(m: Msg): Boolean =
+        m.outgoing && !m.failed && m.rid.isNotBlank() &&
+            m.kind in setOf("text", "file", "voice", "image", "video") &&
+            Recall.withinWindow(m.ts, System.currentTimeMillis() / 1000)
+
+    /**
+     * 撤回一条消息：给对方发 kind=recall（body 带 rid），成功后本地原位替换成灰字。
+     * 窗口在发送方校验；接收端不二次校验（消息本来就到了，晚到的撤回也只是把
+     * 已显示的换掉，没有"没收到的消息被撤走"的泄露问题）。
+     */
+    fun recall(who: String, m: Msg): Res<Unit> {
+        if (!m.outgoing) return Res(null, err = AppError(ErrKind.RECALL_NOT_OUTGOING))
+        if (m.rid.isBlank()) return Res(null, err = AppError(ErrKind.RECALL_NO_RID))
+        if (!Recall.withinWindow(m.ts, System.currentTimeMillis() / 1000)) {
+            return Res(null, err = AppError(ErrKind.RECALL_WINDOW_PASSED))
+        }
+        val body = JSONObject().put("rid", m.rid).toString()
+        val (_, e) = envelope(
+            Native.sendBatch(dir, who, "recall", JSONArray().put(body).toString())
+        )
+        // e 一定非空（进 if 的条件），中文兜底是死代码
+        if (e != null) return Res(null, e)
+        applyRecall(who, m.rid, byMe = true)
+        return Res(Unit, null)
+    }
+
+    /** 收到对方的撤回消息：按 rid 找到本地那条，替换成灰字；找不到就忽略 */
+    private fun handleIncomingRecall(who: String, inc: Incoming) {
+        val rid = runCatching { JSONObject(inc.body ?: "").optString("rid") }.getOrDefault("")
+        if (rid.isBlank()) return
+        applyRecall(who, rid, byMe = false)
+    }
+
+    /** 本地执行撤回：换灰字 + 把撤掉的消息引用的文件副本删干净（不留"已撤回"的尸体） */
+    private fun applyRecall(who: String, rid: String, byMe: Boolean) {
+        val orig = store.recallByRid(who, rid, byMe) ?: return
+        deleteBlobFiles(orig)
+    }
+
+    /** 删掉文件类消息引用的本机副本（私有目录 + 已存下载的那份）。普通文件之外都算 */
+    private fun deleteBlobFiles(m: Msg) {
+        if (m.kind !in setOf("file", "voice", "image", "video")) return
+        val v = runCatching { JSONObject(m.text) }.getOrNull() ?: return
+        listOfNotNull(
+            v.optString("path").takeIf { it.isNotBlank() },
+            v.optString("saved").takeIf { it.isNotBlank() },
+        ).forEach { p -> runCatching { File(p).delete() } }
+    }
+
+    // ---------------------------------------------------------------- 阅后即焚
+
+    /** 记录首次展示时刻（阅后即焚计时起点）。幂等：重复调无害 */
+    fun markSeen(who: String, m: Msg) {
+        if (m.burn <= 0 || m.seenAt > 0) return
+        store.markSeen(who, m.id, System.currentTimeMillis() / 1000)
+    }
+
+    /**
+     * 扫描并焚毁到期的消息，返回焚毁条数。
+     *
+     * 调用时机：收消息循环每轮、聊天页每秒 tick、App 启动。三层兜底保证
+     * 无论哪条路径活着，到期的消息都活不过下一个检查点。
+     * [who] 传 null 时扫全部会话（启动/服务循环用），传会话名只扫一个（聊天页用）。
+     */
+    fun sweepExpired(who: String? = null): Int {
+        val now = System.currentTimeMillis() / 1000
+        val targets = synchronized(msgLock) {
+            val keys = if (who != null) listOf(who) else store.keys()
+            keys.flatMap { k ->
+                store.slice(k).filter { Burn.expired(it.burn, it.seenAt, now) }.map { k to it }
+            }
+        }
+        targets.forEach { (k, m) ->
+            store.deleteById(k, m.id)
+            deleteBlobFiles(m)
+        }
+        return targets.size
+    }
+
+    // -------------------------------------------------------------- 文件传输
+    //
+    // 设计（docs/协议规范-v0.md §任务⑤）：不引入新通道，文件拆成多条 kind="file"
+    // 的消息，body 为 JSON {fid, name, size, idx, total, data(base64)}。
+    // Rust 侧 send_batch 一次连接推一批块（逐块 send 每块都要一次 WS 握手，不可用）。
+
+    /** 单块原始数据大小。24KB → base64 后约 32KB，加密后仍远小于中继 64KB 单条上限 */
+    private const val FILE_CHUNK = 24 * 1024
+    /**
+     * 单次 sendBatch 推多少块。
+     *
+     * 上限来自中继的速率限制：每连接 120 条/分钟，且每条新连接重新计数。
+     * 一次批推就是一个连接，所以要压在这条线以内——40 块留了三倍余量。
+     * （改大反而会被限流，表现为"传一半失败"。）
+     */
+    private const val FILE_BATCH = 40
+    /**
+     * 文件大小上限：20MB。
+     *
+     * 为什么不是更大：文件走的是消息通道，20MB 要拆成约 854 条消息塞进中继队列，
+     * 收发两端都要逐条解密。再大就不该走这条路了（该上 DataChannel / 断点续传）。
+     */
+    const val FILE_MAX_BYTES = 20L * 1024 * 1024
+
+    /** 接收中的文件进度。语音/图片/视频也走这条，靠 [kind] 区分文案与落盘策略 */
+    data class FileRx(
+        val who: String,
+        val fid: String,
+        val name: String,
+        val total: Int,
+        val got: Int,
+        val size: Long,
+        val kind: String = "file",
+        val durMs: Long = 0,
+        val w: Int = 0,
+        val h: Int = 0,
+        val burn: Long = 0,
+    ) {
+        val isVoice: Boolean get() = kind == "voice"
+        val isImage: Boolean get() = kind == "image"
+        val isVideo: Boolean get() = kind == "video"
+        val percent: Int get() = if (total <= 0) 0 else (got * 100 / total).coerceIn(0, 100)
+        /** 已收到的字节（最后一块可能不满，按 size 截断） */
+        val bytes: Long get() = (got.toLong() * FILE_CHUNK).coerceAtMost(size)
+    }
+
+    /**
+     * 接收中的文件状态。
+     *
+     * 块**直接写进临时文件的对应偏移**，不再攒在内存里：20MB 文件攒内存里
+     * 就是 20MB 常驻 + 一堆小 ByteArray 的 GC 压力，低端机直接 OOM。
+     * 用 RandomAccessFile 按 idx 定位，乱序到达、重复到达都能正确处理。
+     */
+    private class RxState(
+        val who: String,
+        val fid: String,
+        val name: String,
+        val total: Int,
+        val size: Long,
+        val tmp: File,
+        /** "file" / "voice" / "image" / "video"：收齐后落聊天记录时要用它决定摘要字段与落盘策略 */
+        val kind: String = "file",
+        /** 语音/视频时长（毫秒），随每块一起带过来 */
+        val durMs: Long = 0,
+        /** 图片/视频的像素宽高，气泡要按比例显示 */
+        val w: Int = 0,
+        val h: Int = 0,
+        /** 阅后即焚档位（秒），随每块一起带过来 */
+        val burn: Long = 0,
+    ) {
+        val have = java.util.BitSet(total)
+        var got = 0
+        var raf: java.io.RandomAccessFile? = null
+    }
+
+    /** 接收进度表：fid → 状态 + 给 UI 的快照。UI 观察 fileRxTick 实时刷新 */
+    private val fileRx = linkedMapOf<String, Pair<RxState, FileRx>>()
+    var fileRxTick by androidx.compose.runtime.mutableStateOf(0)
+        private set
+
+    fun incomingFiles(): List<FileRx> = synchronized(msgLock) { fileRx.values.map { it.second } }
+
+    /** 通知 UI 一个正在接收的文件有新进展 */
+    private fun bumpFileRx() { fileRxTick++ }
+
+    /**
+     * 发送一个文件、语音、图片或视频。
+     *
+     * 用 [open] 而不是 ByteArray：20MB 整块读进内存，在低端机上就是一次 OOM 的风险，
+     * 而且读完才开传，用户要干等好几秒才有反应。这里边读边发，内存占用恒定一块。
+     *
+     * [kind] 取 "file" / "voice" / "image" / "video"：四者共用同一套分块协议，
+     * 区别只在消息类型和摘要里的附加字段（dur / w / h）。
+     * 接收端靠 kind 决定气泡样式，以及**要不要自动落「下载」目录**——
+     * 只有普通文件自动落，语音/图片/视频都只活在 App 私有目录。
+     *
+     * onProgress 参数是 (已发字节, 总字节)，每批回调一次。
+     */
+    fun sendFile(
+        to: String,
+        name: String,
+        size: Long,
+        open: () -> java.io.InputStream,
+        kind: String = "file",
+        /** 语音/视频时长（毫秒）。其他类型传 0 */
+        durMs: Long = 0,
+        /** 图片/视频像素宽高。不知道就传 0，气泡会退回 4:3 */
+        width: Int = 0,
+        height: Int = 0,
+        /** 阅后即焚档位（秒）。0 = 普通；>0 时双端首次展示后到时即删 */
+        burn: Long = 0,
+        onProgress: (Long, Long) -> Unit = { _, _ -> },
+    ): Res<Unit> {
+        if (size <= 0) return Res(null, err = AppError(ErrKind.FILE_EMPTY))
+        if (size > FILE_MAX_BYTES) {
+            return Res(
+                null,
+                err = AppError(ErrKind.FILE_TOO_BIG, (FILE_MAX_BYTES / 1024 / 1024).toString())
+            )
+        }
+        val fid = java.util.UUID.randomUUID().toString().take(8)
+        val total = ((size + FILE_CHUNK - 1) / FILE_CHUNK).toInt()
+        val buf = ByteArray(FILE_CHUNK)
+        var batch = ArrayList<String>(FILE_BATCH)
+        var sent = 0L
+
+        // 发出去的文件在本机留一份副本。
+        // 只记原始路径不行——来源是 content:// 或用户随时会删的临时文件，
+        // 过几天聊天记录里那条气泡就打不开了。边发边写，不多读一遍磁盘。
+        val sentDir = File(deviceDir.parentFile, "sent").apply { mkdirs() }
+        val keepFile = File(sentDir, "${fid}_${sanitize(name)}")
+        var keepOut: java.io.OutputStream? = null
+
+        /** 推一批。返回 null 表示成功 */
+        fun flush(): String? {
+            if (batch.isEmpty()) return null
+            val (_, e) = envelope(Native.sendBatch(dir, to, kind, JSONArray(batch).toString()))
+            batch = ArrayList(FILE_BATCH)
+            return e
+        }
+
+        val readErr = runCatching {
+            keepOut = java.io.FileOutputStream(keepFile)
+            open().use { ins ->
+                var idx = 0
+                while (idx < total) {
+                    var read = 0
+                    while (read < FILE_CHUNK) {
+                        val n = ins.read(buf, read, FILE_CHUNK - read)
+                        if (n <= 0) break
+                        read += n
+                    }
+                    if (read == 0) break   // 文件比声明的短：按实际读到的发
+                    keepOut?.write(buf, 0, read)
+                    val piece = if (read == FILE_CHUNK) buf else buf.copyOf(read)
+                    batch.add(
+                        JSONObject()
+                            .put("fid", fid).put("name", name).put("size", size)
+                            .put("idx", idx).put("total", total)
+                            // 元数据每块都带：块是乱序到达的，第一条到的未必是第 0 块，
+                            // 只在头部带的话接收端可能永远拿不到
+                            .put("dur", durMs).put("w", width).put("h", height)
+                            .put("burn", burn)
+                            .put("data", android.util.Base64.encodeToString(piece, android.util.Base64.NO_WRAP))
+                            .toString()
+                    )
+                    sent += read
+                    idx++
+                    if (batch.size >= FILE_BATCH) {
+                        flush()?.let { throw java.io.IOException(it) }
+                        onProgress(sent, size)
+                    }
+                }
+            }
+        }.exceptionOrNull()
+        runCatching { keepOut?.close() }
+        if (readErr != null) {
+            // 没发出去就别留着半个副本，否则聊天里会出现一个"看起来发过"的坏文件
+            keepFile.delete()
+            return Res(
+                null,
+                err = AppError(
+                    ErrKind.FILE_SEND_FAILED,
+                    readErr.message ?: readErr.javaClass.simpleName
+                )
+            )
+        }
+        flush()?.let { e ->
+            keepFile.delete()
+            return Res(null, e)
+        }
+        onProgress(sent, size)
+
+        val summary = blobSummary(
+            fid, name, sent, keepFile.absolutePath, null, kind, durMs, width, height, burn
+        ).toString()
+        append(to, Msg(summary, System.currentTimeMillis() / 1000, outgoing = true, kind = kind, rid = fid, burn = burn))
+        return Res(Unit, null)
+    }
+
+    /**
+     * 文件类消息的概要 JSON（聊天记录里 text 字段存的就是它）。
+     *
+     * - `path`：本机副本的绝对路径（发送方的 sent/、接收方的 inbox/）。
+     * - `saved`：已经存到公共「下载/AnonChat」的路径。有它说明文件在 App 之外也有一份，
+     *   卸载 App 也不会丢；界面据此显示「已存 下载/AnonChat」。
+     * - `dur` / `w` / `h`：只有语音和图片视频才带，普通文件不写多余字段
+     *   （老版本 App 读到不认识的字段也不会炸，它只 opt 自己关心的那几个）。
+     */
+    private fun blobSummary(
+        fid: String,
+        name: String,
+        size: Long,
+        path: String?,
+        saved: String?,
+        kind: String,
+        durMs: Long,
+        w: Int,
+        h: Int,
+        burn: Long = 0,
+    ): JSONObject {
+        val o = JSONObject()
+            .put("fid", fid)
+            .put("name", name)
+            .put("size", size)
+        if (durMs > 0) o.put("dur", durMs)
+        if (w > 0 && h > 0) o.put("w", w).put("h", h)
+        if (burn > 0) o.put("burn", burn)
+        if (path != null) o.put("path", path)
+        if (saved != null) o.put("saved", saved)
+        return o
+    }
+
+    /**
+     * 处理收到的文件块。收齐时写盘并落一条聊天记录；没收齐时只更新进度。
+     * 必须在 recvOnce 的调用线程（IO）里跑。
+     */
+    private fun receiveFileChunk(who: String, inc: Incoming) {
+        val v = runCatching { JSONObject(inc.body ?: "") }.getOrNull() ?: return
+        val fid = v.optString("fid")
+        // 兜底文件名用 ASCII：这是数据（落盘 + 进消息摘要），不是界面文案
+        val name = v.optString("name", "file")
+        val total = v.optInt("total", 0)
+        val idx = v.optInt("idx", -1)
+        val size = v.optLong("size", 0)
+        val durMs = v.optLong("dur", 0)
+        val w = v.optInt("w", 0)
+        val h = v.optInt("h", 0)
+        val burn = v.optLong("burn", 0)
+        // 只认我们自己定义的四种载荷类型：对面万一发来别的 kind，
+        // 按普通文件落盘总比丢消息好
+        val kind = when (inc.kind) {
+            "voice", "image", "video" -> inc.kind
+            else -> "file"
+        }
+        val data = runCatching {
+            android.util.Base64.decode(v.optString("data"), android.util.Base64.NO_WRAP)
+        }.getOrNull() ?: return
+        if (fid.isBlank() || total <= 0 || idx !in 0 until total) return
+        if (size > FILE_MAX_BYTES) {
+            android.util.Log.w("AnonChat", "oversized file rejected $name ($size bytes)")
+            return
+        }
+
+        var done: Pair<File, FileRx>? = null
+        synchronized(msgLock) {
+            val (st, _) = fileRx.getOrPut(fid) {
+                val dir = File(deviceDir.parentFile, "inbox").apply { mkdirs() }
+                val safeName = name.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                val tmp = File(dir, ".$fid.part")
+                RxState(who, fid, name, total, size, tmp, kind, durMs, w, h, burn) to
+                    FileRx(who, fid, name, total, 0, size, kind, durMs, w, h, burn)
+            }
+            if (!st.have.get(idx)) {
+                // 落在正确偏移上：乱序到达也不用等，重复到达直接忽略
+                runCatching {
+                    val raf = st.raf ?: java.io.RandomAccessFile(st.tmp, "rw").also { st.raf = it }
+                    raf.seek(idx.toLong() * FILE_CHUNK)
+                    raf.write(data)
+                    st.have.set(idx)
+                    st.got++
+                }.onFailure { t ->
+                    android.util.Log.w("AnonChat", "write file chunk failed ${t.message}")
+                }
+            }
+            val prog = FileRx(st.who, st.fid, st.name, st.total, st.got, st.size, st.kind, st.durMs, st.w, st.h, st.burn)
+            fileRx[fid] = st to prog
+            if (st.got == total) {
+                runCatching {
+                    st.raf?.close()
+                    st.raf = null
+                    val finalFile = File(st.tmp.parentFile, "${st.fid}_${sanitize(st.name)}")
+                    if (!st.tmp.renameTo(finalFile)) {
+                        st.tmp.copyTo(finalFile, overwrite = true)
+                        st.tmp.delete()
+                    }
+                    done = finalFile to prog
+                    fileRx.remove(fid)
+                }.onFailure { t ->
+                    android.util.Log.w("AnonChat", "file write failed: ${t.message}")
+                }
+            }
+        }
+        bumpFileRx()
+
+        done?.let { (out, prog) ->
+            // 普通文件顺手在「下载/AnonChat」留一份：私有目录那份只有 App 自己能读、
+            // 卸载就没了，用户要的"存到手机"只能是公共目录。API 29 以下返回 null
+            // （写公共目录要全盘权限），那种机器上靠气泡里的"保存到手机"走系统选择器。
+            //
+            // 语音/图片/视频**都不落公共目录**：它们的内容属于聊天正文，不是用户
+            // 主动索要的文件。偷偷往下载目录丢一堆 voice_*.m4a / IMG_*.jpg，
+            // 既像泄露隐私，也会把相册和文件管理器塞满碎片。想导出走长按菜单。
+            val saved = if (prog.kind == "file") runCatching {
+                FileSaver.saveToDownloads(appCtx, prog.name, out)
+            }.getOrNull() else null
+            // 对面没带宽高/时长（CLI、老版本客户端）就在本地补一次：
+            // 只影响气泡比例和角标，但缺了会让竖图被按 4:3 裁掉
+            var fw = prog.w
+            var fh = prog.h
+            var fdur = prog.durMs
+            if ((prog.kind == "image" || prog.kind == "video") && (fw <= 0 || fh <= 0 || fdur <= 0)) {
+                val (mw, mh, md) = VideoProbe.dimsOf(out.absolutePath, prog.kind)
+                if (fw <= 0 || fh <= 0) { fw = mw; fh = mh }
+                if (prog.kind == "video" && fdur <= 0) fdur = md
+            }
+            val summary = blobSummary(
+                prog.fid, prog.name, prog.size, out.absolutePath, saved,
+                prog.kind, if (prog.kind == "voice") prog.durMs else fdur, fw, fh,
+                prog.burn,
+            )
+            append(
+                who,
+                Msg(
+                    summary.toString(),
+                    System.currentTimeMillis() / 1000,
+                    outgoing = false,
+                    kind = prog.kind,
+                    // 文件类的撤回引用就是 fid：分块摘要里本来就有，两边天然一致
+                    rid = prog.fid,
+                    burn = prog.burn,
+                )
+            )
+            markUnread(who)
+        }
+    }
+
+    // ---------------------------------------------------------------- 紧急清除
+
+    /** 当前会话的紧急清除暗号（双方各自算出同一个值）。拿不到双方公钥返回 null */
+    fun panicCodeOf(peer: String): String? {
+        val me = identity() ?: return null
+        val peerPk = synchronized(msgLock) { peerCards[peer]?.pk }
+            ?: contacts().firstOrNull { it.dh == peer }?.pk
+        if (peerPk.isNullOrBlank()) return null
+        return Panic.codeOf(me, peerPk)
+    }
+
+    /**
+     * 执行紧急清除。**顺序是硬约束**：
+     * ① 先发 clear.exec 给对方（此时身份密钥还在，能加密投递；对方离线就在
+     *    中继排队，TTL 内上线即清）——对方收到后**无确认直接清**，不弹任何验证；
+     * ② 盲 ack 清空自己的中继队列（不解密，内容是什么不重要）；
+     * ③ 删本机数据层（聊天记录/文件副本/下载目录副本）——**保留身份、联系人、
+     *    会话棘轮**，清完双方无缝继续聊。
+     *
+     * [notifyPeer]=false 用于收到 clear.exec 的一方（对方已发起，幂等不再回发）。
+     * 调用方负责在返回后杀进程重启（数据已空，重启即初始状态）。
+     */
+    fun executePanic(peer: String, notifyPeer: Boolean) {
+        if (notifyPeer) {
+            val (_, e) = envelope(
+                Native.sendBatch(dir, peer, "clear.exec", JSONArray().put("{}").toString())
+            )
+            // 发不出去也继续清本机：对方仍可用暗号自己触发，本机清除不等网络
+            if (e != null) android.util.Log.w("AnonChat", "clear.exec send failed: $e")
+        }
+        runCatching { envelope(Native.purgeQueue(dir)) }
+            .onFailure { android.util.Log.w("AnonChat", "purge relay queue failed: ${it.message}") }
+        wipeData()
+    }
+
+    /** 删数据层。保留 device/（身份、联系人、会话棘轮）与暗号，幂等 */
+    private fun wipeData() {
+        synchronized(msgLock) {
+            unread.clear()
+            fileRx.clear()
+        }
+        store.wipe()
+        runCatching {
+            File(deviceDir.parentFile, "inbox").deleteRecursively()
+            File(deviceDir.parentFile, "sent").deleteRecursively()
+        }
+        runCatching { FileSaver.purgeDownloads(appCtx) }
+        bumpFileRx()
+    }
+
+    private fun sanitize(name: String) = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").ifBlank { "file" }
+
+    /** 已收完的文件消息能不能打开（有 path 且文件还在） */
+    fun fileMsgPath(summaryText: String): String? = runCatching {
+        JSONObject(summaryText).optString("path").takeIf { it.isNotBlank() }
+    }.getOrNull()
+
+    /**
+     * 收一条。timeoutSecs 内没有消息返回 null（不是错误）。
+     * 前台服务会循环调用这个方法。
+     */
+    fun recvOnce(timeoutSecs: Long): Res<Incoming?> {
+        val (d, e) = envelope(Native.recvOnce(dir, timeoutSecs))
+        if (e != null) return Res(null, e)
+        if (d !is JSONObject) return Res(null, null)
+        val inc = Incoming(
+            fromName = if (d.isNull("from_name")) null else d.optString("from_name"),
+            fromId = d.optString("from_id"),
+            text = d.optString("text"),
+            ts = d.optLong("ts"),
+            dh = d.optString("dh"),
+            kind = d.optString("kind", "text"),
+            body = if (d.isNull("body")) null else d.optString("body"),
+            msgId = d.optString("msg_id"),
+            rid = d.optString("rid"),
+            // 文字消息的焚毁参数在 body 里（{"burn":秒}）；文件类不走这里
+            burn = if (d.optString("kind", "text") == "text")
+                runCatching { JSONObject(d.optString("body", "{}")).optLong("burn") }.getOrDefault(0)
+            else 0,
+            selfName = if (d.isNull("self_name")) null else d.optString("self_name"),
+            replyQid = if (d.isNull("reply_qid")) null else d.optString("reply_qid"),
+            replyRelays = (d.optJSONArray("reply_relays") ?: JSONArray()).let { arr ->
+                (0 until arr.length()).map { arr.optString(it) }.filter { s -> s.isNotBlank() }
+            },
+        )
+        // 通话信令不是聊天内容，不能写进消息记录（否则会出现一堆空白消息）
+        if (inc.isCall) return Res(inc, null)
+
+        // 撤回消息：不是聊天内容本身，按 rid 找到本地那条替换成灰字；
+        // 找不到（对方撤回了我这边没有的消息 / 已处理过）就静默忽略
+        if (inc.kind == "recall") {
+            handleIncomingRecall(whoOf(inc), inc)
+            return Res(inc, null)
+        }
+
+        // 文件/语音块：聚合并（收齐时）落盘。不落"每块一条"的聊天记录，
+        // 收齐才出现一条气泡，中间进度走 incomingFiles()。
+        if (inc.isBlob) {
+            receiveFileChunk(whoOf(inc), inc)
+            return Res(inc, null)
+        }
+
+        if (!inc.isText) return Res(inc, null)
+
+        // 陌生人消息也要能落到一个可读的会话里，否则用户在 UI 上永远看不到
+        val who = whoOf(inc)
+        // 顺手记住回信线索：这是唯一一次能拿到它的机会，消息落盘之后就没了
+        if (inc.fromName == null && inc.canReply) rememberCard(who, inc)
+        append(who, Msg(inc.text, inc.ts, outgoing = false, rid = inc.rid, burn = inc.burn))
+        return Res(inc, null)
+    }
+
+    /**
+     * 取走 Rust 侧攒下的告警。前台服务每轮收消息后调一次，
+     * 这样"消息解密失败被丢弃"这类在 Rust 里静默发生的事就能出现在 logcat。
+     */
+    fun drainWarnings(): List<String> {
+        val (d, _) = envelope(Native.takeWarnings())
+        if (d !is JSONArray) return emptyList()
+        return (0 until d.length()).mapNotNull { d.optString(it).takeIf { s -> s.isNotEmpty() } }
+    }
+
+    /** 把发送方 dh 映射成界面上显示的名字 */
+    /**
+     * 会话键 = 对方 DH 公钥。
+     *
+     * 为什么不再用显示名：改名/备注名会让同一个会话裂成两段——
+     * 备注名功能一上线，用名字当键就会把历史消息"丢"在新名字之外的旧会话里。
+     * dh 是对方身份的唯一稳定标识，从加好友那天起就不变。
+     */
+    fun whoOf(inc: Incoming): String = inc.dh
+
+    /**
+     * 陌生人会话名的前缀。
+     *
+     * **这是存储语义，不要改**：peer_cards.json 里存的名字是
+     * `conv.removePrefix("陌生人 ")` 算出来的，前缀变了老名片就反查不出来。
+     *
+     * 界面上要显示本地化版本时走 [MainActivity.displayNameOf]，它按当前语言
+     * 换掉这个前缀，但存的东西原样不动。
+     */
+    const val STRANGER_PREFIX = "陌生人 "
+
+    /** 会话键 → 界面显示名（备注 > 对方昵称 > 陌生人+前缀） */
+    fun displayName(key: String): String {
+        val c = contacts().firstOrNull { it.dh == key }
+        if (c != null) return c.display
+        return peerCards[key]?.name?.takeIf { it.isNotBlank() } ?: (STRANGER_PREFIX + key.take(8))
+    }
+
+    // ---------------------------------------------------------------- 通话
+
+    fun callStart(to: String, video: Boolean): Res<String> {
+        val (d, e) = envelope(Native.callStart(dir, to, video))
+        return Res(d as? String, e)
+    }
+
+    fun callSetOffer(sdp: String): Res<CallEvent> = callEvent(Native.callSetOffer(dir, sdp))
+    fun callRenegotiate(sdp: String): Res<CallEvent> = callEvent(Native.callRenegotiate(dir, sdp))
+    fun callAccept(sdp: String): Res<CallEvent> = callEvent(Native.callAccept(dir, sdp))
+    fun callReject(reason: String = "declined"): Res<CallEvent> =
+        callEvent(Native.callReject(dir, reason))
+
+    fun callHangup(reason: String = "local_ended"): Res<CallEvent> =
+        callEvent(Native.callHangup(dir, reason))
+
+    fun callIce(candidate: String, mid: String, mline: Int): Res<CallEvent> =
+        callEvent(Native.callIce(dir, candidate, mid, mline))
+
+    fun callTick(): Res<CallEvent> = callEvent(Native.callTick(dir))
+    fun callState(): CallEvent? = callEvent(Native.callState(dir)).data
+    fun callReset() { envelope(Native.callReset(dir)) }
+
+    fun callInbound(inc: Incoming): Res<CallEvent> = callEvent(
+        Native.callInbound(dir, inc.dh, inc.kind, inc.body ?: "", inc.msgId)
+    )
+
+    private fun callEvent(raw: String): Res<CallEvent> {
+        val (d, e) = envelope(raw)
+        if (e != null || d !is JSONObject) return Res(null, e)
+        return Res(
+            CallEvent(
+                state = d.optString("state", "idle"),
+                callId = d.optString("call_id"),
+                peerDh = d.optString("peer_dh"),
+                video = d.optBoolean("video"),
+                reason = d.optString("reason"),
+                remoteSdp = if (d.isNull("remote_sdp")) null else d.optString("remote_sdp"),
+                iceCandidate = d.optJSONObject("ice")?.optString("candidate"),
+                iceMid = d.optJSONObject("ice")?.optString("mid") ?: "",
+                iceMline = d.optJSONObject("ice")?.optInt("mline") ?: 0,
+                renegotiating = d.optBoolean("renegotiating"),
+            ), null
+        )
+    }
+
+    /** 按 dh 找联系人名 */
+    fun nameOfDh(dh: String): String? = contacts().firstOrNull { it.dh == dh }?.display
+
+    // ---------------------------------------------------------------- 消息历史
+    //
+    // 存储是 append-only 日志（[MsgStore]），所以这里**不再有"保存全部消息"这回事**：
+    // 每加一条只追加一行。UI 那边按窗口取，见 messageCount/messagesOf(from,to)。
+
+    /** 某个会话有多少条消息。聊天页靠它算分页窗口 */
+    fun messageCount(who: String): Int = store.count(who)
+
+    /** 会话列表的最后一条（只要一条，不拷贝整个会话） */
+    fun lastMsgOf(who: String): Msg? = store.last(who)
+
+    /**
+     * 取 [from, to) 区间的消息，默认全部。
+     *
+     * 聊天页只取最近几十条，往上滚再取更多——几千条历史全塞给 LazyColumn
+     * 的话，每次刷新都要把整个列表做一次 diff，滑起来会明显掉帧。
+     */
+    fun messagesOf(who: String, from: Int = 0, to: Int = Int.MAX_VALUE): List<Msg> =
+        store.slice(who, from, to)
+
+    /** 有消息但还没加为联系人的会话（只能看，不能回） */    fun unverifiedConversations(): List<String> {
+        // 会话键现在是 dh，已知集合也要按 dh 比
+        val known = contacts().map { it.dh }.toSet()
+        return store.keys().filter { it !in known && store.count(it) > 0 }
+    }
+
+    // 未读数见 unread/totalUnread()
+
+    // ---------------------------------------------------------------- 回邀
+
+    /** 陌生人会话名 → 回信名片。key 用会话名，因为它就是 UI 上唯一的标识 */
+    private val peerCards = HashMap<String, PeerCard>()
+    private lateinit var cardFile: File
+
+    private fun rememberCard(conv: String, inc: Incoming) {
+        val qid = inc.replyQid ?: return
+        if (inc.replyRelays.isEmpty()) return
+        val card = PeerCard(
+            name = inc.selfName?.takeIf { it.isNotBlank() } ?: conv.removePrefix("陌生人 "),
+            pk = inc.fromId,
+            dh = inc.dh,
+            qid = qid,
+            relays = inc.replyRelays,
+        )
+        val changed = synchronized(msgLock) { peerCards.put(conv, card) != card }
+        if (changed) saveCards()
+    }
+
+    fun cardOf(conv: String): PeerCard? = synchronized(msgLock) { peerCards[conv] }
+
+    /**
+     * 取联系人卡片；没有就从联系人表补一张。
+     *
+     * 两条来源不一样：**经邀请码加进来的**联系人在 Rust 侧 contacts.json 里，
+     * **对方加你**的陌生人才会在 peer_cards.json 留卡片。安全码两种都要能算，
+     * 所以这里统一成"先看卡片，没有就按联系人表补一张"。
+     */
+    private fun cardOrBuild(conv: String): PeerCard? {
+        val cached = synchronized(msgLock) { peerCards[conv] }
+        if (cached != null && cached.pk.isNotBlank()) return cached
+        val c = contacts().firstOrNull { it.dh == conv } ?: return cached
+        val card = PeerCard(
+            name = c.display, pk = c.pk, dh = c.dh, qid = c.qid, relays = emptyList(),
+            verified = cached?.verified ?: false,
+            verifiedCode = cached?.verifiedCode ?: "",
+        )
+        synchronized(msgLock) { peerCards[conv] = card }
+        saveCards()
+        return card
+    }
+
+    /**
+     * 这个会话的安全码。双方各自算一遍，数字一样就说明中间没有第三方。
+     *
+     * 需要对方的身份公钥——只有收到过对方消息（或邀请码）才拿得到。
+     * 没有卡片时返回 null，由界面提示"等对方发一条消息再核对"。
+     */
+    fun safetyCodeOf(conv: String): String? {
+        val me = identity() ?: return null
+        val card = cardOrBuild(conv) ?: return null
+        if (card.pk.isBlank()) return null
+        val (d, _) = envelope(Native.safetyCode(me, card.pk))
+        return d as? String
+    }
+
+    /** 界面上"我已核对"的状态：核对的码和当前码一致才算数（对方换身份就自动作废） */
+    fun isVerified(conv: String): Boolean {
+        val c = cardOrBuild(conv) ?: return false
+        if (!c.verified) return false
+        val now = safetyCodeOf(conv) ?: return false
+        return now == c.verifiedCode
+    }
+
+    /** 记录"我当面核对过了"。code 传当前算出来的那串，将来对不上就自动失效。 */
+    fun setVerified(conv: String, ok: Boolean) {
+        val c = cardOrBuild(conv) ?: return
+        val code = if (ok) (safetyCodeOf(conv) ?: return) else ""
+        synchronized(msgLock) { peerCards[conv] = c.copy(verified = ok, verifiedCode = code) }
+        saveCards()
+    }
+
+    /**
+     * 把陌生人会话里的对方加为联系人，并把聊天记录迁到新名字下。
+     *
+     * 这是"只能看不能回"的出口：对方加了你、给你发消息，你点一下就能回过去，
+     * 不用再让对方重新生成一次邀请码。
+     */
+    fun addPeer(conv: String): Res<String> {
+        val card = cardOf(conv)
+            ?: return Res(null, err = AppError(ErrKind.ADD_NO_CLUE))
+        val (d, e) = envelope(
+            Native.addFromCard(dir, card.name, card.dh, card.pk, card.qid, JSONArray(card.relays).toString())
+        )
+        val name = d as? String
+        if (e != null || name.isNullOrBlank()) {
+            return Res(null, error = e, err = if (e == null) AppError(ErrKind.ADD_FAILED) else null)
+        }
+        moveConversation(conv, name)
+        return Res(name, null)
+    }
+
+    /** 会话改名：消息、未读、名片一起搬过去，别让用户在界面上"丢历史" */
+    private fun moveConversation(from: String, to: String) {
+        if (from == to) return
+        // 消息迁移只写一条 mv 记录（日志里回放），不再整文件重写
+        store.move(from, to)
+        synchronized(msgLock) {
+            val u = unread.remove(from)
+            if (u != null) unread[to] = (unread[to] ?: 0) + u
+            // 卡片要跟着搬：留着旧键的话，新名字下没有对方公钥，安全码就再也算不出来
+            val card = peerCards.remove(from)
+            if (card != null) peerCards[to] = card.copy(name = to)
+        }
+        saveCards()
+    }
+
+    private fun saveCards() {
+        runCatching {
+            val snapshot = synchronized(msgLock) {
+                peerCards.mapValues { (_, c) ->
+                    JSONObject()
+                        .put("name", c.name).put("pk", c.pk).put("dh", c.dh)
+                        .put("qid", c.qid).put("relays", JSONArray(c.relays))
+                        .put("verified", c.verified).put("vcode", c.verifiedCode)
+                }
+            }
+            val root = JSONObject()
+            snapshot.forEach { (k, v) -> root.put(k, v) }
+            cardFile.writeText(root.toString())
+        }
+    }
+
+    private fun loadCards() {
+        if (!cardFile.exists()) return
+        runCatching {
+            val root = JSONObject(cardFile.readText())
+            synchronized(msgLock) {
+                root.keys().forEach { k ->
+                    val o = root.optJSONObject(k) ?: return@forEach
+                    val arr = o.optJSONArray("relays") ?: JSONArray()
+                    peerCards[k] = PeerCard(
+                        name = o.optString("name"),
+                        pk = o.optString("pk"),
+                        dh = o.optString("dh"),
+                        qid = o.optString("qid"),
+                        relays = (0 until arr.length()).map { arr.optString(it) },
+                        verified = o.optBoolean("verified", false),
+                        verifiedCode = o.optString("vcode", ""),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 写一条通话记录进聊天。
+     *
+     * 为什么必须写：不留记录的话，未接来电在界面上**完全没有痕迹**，
+     * 用户只会觉得"手机没响过"。这是通话功能和消息功能之间最容易漏掉的衔接点。
+     */
+    fun appendCallLog(peerName: String, text: String) {
+        val who = peerName.ifBlank { "未知联系人" }
+        append(who, Msg(text, System.currentTimeMillis() / 1000, outgoing = true, kind = "call"))
+    }
+
+    private fun append(who: String, m: Msg) {
+        store.append(who, m)
+    }
+
+    // ---------------------------------------------------------------- 信封
+
+    private fun envelope(raw: String): Pair<Any?, String?> {
+        return try {
+            val o = JSONObject(raw)
+            if (o.optBoolean("ok")) {
+                (if (o.isNull("data")) null else o.get("data")) to null
+            } else {
+                // 技术信息走 error 通道，语言中性（不进本地化资源）
+                null to o.optString("error", "unknown core error")
+            }
+        } catch (t: Throwable) {
+            null to "unparsable core response: ${t.message}"
+        }
+    }
+}

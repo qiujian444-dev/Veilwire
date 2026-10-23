@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色模式的父主题必须是 Material（非 Light），否则系统会按浅色画窗口装饰：
+      底部导航栏区域、下拉通知背景都还是白的，在深色聊天页下面露一条白边。
+    -->
+    <style name="Theme.AnonChat" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_bg</item>
+    </style>
+</resources>

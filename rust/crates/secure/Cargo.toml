@@ -1,0 +1,20 @@
+[package]
+name = "secure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "端到端加密会话：Olm（双棘轮 3DH）封装，密钥永不离开设备"
+
+[dependencies]
+identity = { path = "../identity" }
+proto = { path = "../proto" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+base64 = "0.22"
+vodozemac = "0.9"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+# BIP39 助记词用（sha2/hmac 已在 vodozemac 依赖链里缓存，离线可编译）
+sha2 = "0.10"
+hmac = "0.12"

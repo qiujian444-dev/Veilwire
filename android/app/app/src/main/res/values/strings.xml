@@ -1,0 +1,434 @@
+<resources>
+    <!-- Default (English). Chinese lives in values-zh/strings.xml. -->
+    <string name="app_name">Veilwire</string>
+
+    <!-- Call screen -->
+    <string name="call_unknown_contact">Unknown contact</string>
+    <string name="call_ice_connecting">Establishing media channel (%1$s)</string>
+    <string name="call_reject">Decline</string>
+    <string name="call_accept">Answer</string>
+    <string name="call_cancel">Cancel</string>
+    <string name="call_hangup">Hang up</string>
+    <string name="call_close">Close</string>
+    <string name="call_mute">Mute</string>
+    <string name="call_muted">Muted</string>
+    <string name="call_speaker_on">Speaker on</string>
+    <string name="call_speaker_off">Speaker off</string>
+    <string name="call_reconnect">Reconnect</string>
+    <string name="call_reconnecting">Reconnecting</string>
+
+    <string name="call_state_incoming_video">Incoming video call…</string>
+    <string name="call_state_incoming_voice">Incoming voice call…</string>
+    <string name="call_state_outgoing_video">Calling (video)…</string>
+    <string name="call_state_outgoing_voice">Calling…</string>
+    <string name="call_state_resuming">Restoring call…</string>
+    <string name="call_state_connected">Connected, establishing channel…</string>
+    <string name="call_state_ended">Call ended</string>
+
+    <string name="call_end_declined">Call declined</string>
+    <string name="call_end_busy">Peer is on another call</string>
+    <string name="call_end_no_answer">No answer</string>
+    <string name="call_end_missed">Missed call</string>
+    <string name="call_end_local_ended">You hung up</string>
+    <string name="call_end_peer_ended">Peer hung up</string>
+    <string name="call_end_other">Call ended (%1$s)</string>
+
+    <!-- Incoming call notification -->
+    <string name="notif_call_channel">Incoming calls</string>
+    <string name="notif_call_channel_desc">Alerts for incoming voice and video calls</string>
+    <string name="notif_call_someone">Someone</string>
+    <string name="notif_call_kind_video">video call</string>
+    <string name="notif_call_kind_voice">voice call</string>
+    <string name="notif_call_title">%1$s · %2$s</string>
+    <string name="notif_call_answer">Tap to answer</string>
+
+    <!-- Tabs / app shell -->
+    <string name="tab_chats">Chats</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Contact list -->
+    <string name="chats_banner_service_off">Not receiving messages — you will only see them after opening the app</string>
+    <string name="chats_banner_start">Start</string>
+    <string name="chats_banner_battery">Allow the battery optimisation exemption, or messages stop arriving with the screen off</string>
+    <string name="chats_banner_grant">Allow</string>
+    <string name="chats_contacts">Contacts</string>
+    <string name="chats_my_invite">My invite code</string>
+    <string name="chats_empty_title">No contacts yet</string>
+    <string name="chats_empty_hint">Tap “My invite code” at the top right and send it to them, or tap “Add contact” below and paste theirs.</string>
+    <string name="chats_unverified_header">Not in your contacts yet (open to add)</string>
+    <string name="chats_unverified_with_card">They messaged you first · you can add them</string>
+    <string name="chats_unverified_plain">They messaged you first</string>
+    <string name="chats_no_messages">No messages yet</string>
+    <string name="chats_add_contact">＋ Add contact</string>
+
+    <!-- Contact management -->
+    <string name="chats_manage_alias">Set alias</string>
+    <string name="chats_manage_delete_chat">Delete chat only</string>
+    <string name="chats_manage_delete_contact">Delete contact and chat</string>
+    <string name="alias_title">Alias</string>
+    <string name="alias_label">Alias (leave empty to use their name)</string>
+    <string name="alias_hint">Stored only on this device — the other side never sees it, and chat history is unaffected.</string>
+    <string name="alias_saved">Alias updated</string>
+    <string name="action_save">Save</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_done">Done</string>
+    <string name="action_ok">OK</string>
+    <string name="delete_contact_title">Delete contact?</string>
+    <string name="delete_chat_title">Delete chat?</string>
+    <string name="delete_contact_body">This deletes every message and file copy exchanged with “%1$s”, and clears the encrypted session.\n\nThis cannot be undone. If they message you again they will show up as a stranger.</string>
+    <string name="delete_chat_body">This deletes only the messages and file copies with “%1$s”. The contact stays and you can keep chatting.\n\nThis cannot be undone.</string>
+    <string name="delete_done">Deleted</string>
+    <string name="delete_failed">Delete failed</string>
+    <string name="dialog_notice">Notice</string>
+
+    <!-- Invite dialog -->
+    <string name="invite_title">My invite code</string>
+    <string name="invite_hint">Send it to them. Once they have added you, add them back — both directions are required.</string>
+    <string name="invite_generate">Generate invite code</string>
+    <string name="invite_regenerate">Regenerate</string>
+    <string name="invite_copied">Copied. An invite works once only — generate a new one for the next person.</string>
+    <string name="invite_qr_desc">Invite QR code</string>
+    <string name="invite_qr_hint">They scan this with “Add contact”</string>
+
+    <!-- Add contact dialog -->
+    <string name="add_title">Add contact</string>
+    <string name="add_hint">Scan their code, or paste the invite they sent you</string>
+    <string name="add_scan_prompt">Point at their invite QR code</string>
+    <string name="add_scan">📷 Scan QR code</string>
+    <string name="add_adding">Adding…</string>
+    <string name="add_action">Add</string>
+
+    <!-- Onboarding: identity -->
+    <string name="setup_tagline">No phone number, no sign-up. Your identity is a key pair — and the keys stay with you.</string>
+    <string name="setup_nickname_label">Nickname (the name the other side sees)</string>
+    <string name="setup_phrase_label">Paste your 12 recovery words (separated by spaces or newlines)</string>
+    <string name="setup_restore_hint">What is restored is the identity itself. Contacts have to be re-added, but the other side still sees the same you.</string>
+    <string name="setup_err_phrase_failed">Failed to generate the recovery phrase</string>
+    <string name="setup_creating">Creating…</string>
+    <string name="setup_create">Create identity</string>
+    <string name="setup_have_phrase">Already have a recovery phrase? Restore it</string>
+    <string name="setup_restoring">Restoring…</string>
+    <string name="setup_restore">Restore identity</string>
+    <string name="setup_back_to_create">Back — create a new identity</string>
+
+    <!-- Onboarding: phrase -->
+    <string name="phrase_title">Write down your recovery phrase</string>
+    <string name="phrase_hint">These 12 words are your identity. Delete the app or switch phones, and only they can bring it back. We never store them, and there is no password recovery.</string>
+    <string name="phrase_warning">Write them on paper. Screenshots, cloud notes and keyboard clipboards can all leak.</string>
+    <string name="phrase_confirmed">I have written the 12 words down on paper</string>
+    <string name="phrase_continue">Next: choose a relay</string>
+
+    <!-- Onboarding: relay -->
+    <string name="relay_title">Choose a relay</string>
+    <string name="relay_hint">The relay only forwards encrypted parcels and cannot see message content. It is run by the community or by you; the project operates no servers. The list is community-curated and availability is not guaranteed.</string>
+    <string name="relay_loading">Fetching the relay list…</string>
+    <string name="relay_empty_title">List unavailable right now</string>
+    <string name="relay_empty_hint">Could be the network, or the community list simply has no entries yet. If a friend set up a relay for you, enter the address below.</string>
+    <string name="relay_region_unknown">Region unknown</string>
+    <string name="relay_probing">Probing…</string>
+    <string name="relay_unreachable">Unreachable</string>
+    <string name="relay_custom_title">Use your own relay</string>
+    <string name="relay_custom_label">ws://192.168.1.10:8080 or wss://relay.example.com</string>
+    <string name="relay_connecting">Connecting…</string>
+    <string name="relay_use">Use this address</string>
+    <string name="relay_src_online">Official list (online)</string>
+    <string name="relay_src_cache">Cached list</string>
+    <string name="relay_src_bundled">Built-in list</string>
+    <string name="relay_src_none">No list available</string>
+
+    <!-- Settings: identity / receiving / battery -->
+    <string name="settings_identity">My identity</string>
+    <string name="settings_copied_id">Identity ID copied</string>
+    <string name="settings_copy_id">Copy ID</string>
+    <string name="settings_id_hint">The ID is not an account and cannot be searched. If you delete the app or wipe its data, the recovery phrase brings it back.</string>
+    <string name="settings_view_phrase">View recovery phrase</string>
+    <string name="settings_receiving">Receiving messages</string>
+    <string name="settings_running">Keeping a background connection (up %1$d min, %2$d reconnects)</string>
+    <string name="settings_not_running">Not running — you will not receive anything</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_start">Start</string>
+    <string name="settings_battery_title">Battery optimisation whitelist</string>
+    <string name="settings_battery_ok">Granted — messages keep arriving with the screen off</string>
+    <string name="settings_battery_missing">Not granted. With the screen off Android suspends networking and messages can be delayed for a long time. That is an Android limitation, not a bug.</string>
+    <string name="settings_oem_autostart">Vendor autostart</string>
+
+    <!-- Settings: relay -->
+    <string name="settings_relay_label">Relay address</string>
+    <string name="settings_relay_list">List</string>
+    <string name="settings_relay_hint">Relays are run by the community or by users. After changing it, tap Save below.</string>
+    <string name="settings_saved">Saved</string>
+    <string name="settings_save">Save settings</string>
+    <string name="settings_switch_relay_title">Switch relay?</string>
+    <string name="settings_switch_new_addr">New address: %1$s</string>
+    <string name="settings_switch_body">Your inbox queue and every contact\'s relay will move to the new address.\n\nNote: messages not yet delivered on the old relay **will not** migrate — the other side has to send them again.\n\nThe other side also needs to be able to reach this relay, or nothing can be sent between you.</string>
+    <string name="settings_switch_verifying">Verifying the new relay…</string>
+    <string name="settings_switch_done">Relay switched</string>
+    <string name="settings_switch_failed">Switch failed: %1$s</string>
+    <string name="settings_switch_action">Switch</string>
+    <string name="settings_unknown_error">unknown error</string>
+    <string name="settings_foss_note">Free and open-source software · the project operates no servers</string>
+
+    <!-- Settings: ICE (STUN / TURN) -->
+    <string name="ice_title">Call network (STUN / TURN)</string>
+    <string name="action_collapse">Collapse</string>
+    <string name="action_expand">Expand</string>
+    <string name="ice_hint">Calls across carriers or networks require your own TURN, otherwise you only get signalling and no audio.</string>
+    <string name="ice_paste_label">Paste a TURN link, e.g. turn://user:pass@1.2.3.4:3478</string>
+    <string name="ice_bad_format">Unrecognised format. Supported: turn://user:pass@host:port or host:port</string>
+    <string name="ice_filled">Filled in: %1$s</string>
+    <string name="ice_parse_fill">Parse and fill</string>
+    <string name="ice_probing">Collecting ICE candidates (up to 12 s)…</string>
+    <string name="ice_probe_timeout">(timed out while finishing, results may be incomplete)</string>
+    <string name="ice_testing">Testing…</string>
+    <string name="ice_test">Test connectivity</string>
+    <string name="ice_stun_label">STUN (empty for default)</string>
+    <string name="ice_turn_label">TURN, e.g. turn:1.2.3.4:3478</string>
+    <string name="ice_username">Username</string>
+    <string name="ice_password">Password</string>
+    <string name="ice_err_not_init">WebRTC is not initialised yet — open the settings page once and try again</string>
+    <string name="ice_err_pc_failed">Failed to create the PeerConnection</string>
+    <string name="ice_ok_turn">✅ TURN works: got %1$d relay candidates, cross-network calls are fine</string>
+    <string name="ice_fail_turn">❌ TURN did not connect: STUN works but no relay candidates. Check the address and credentials, and whether the server\'s 3478/udp is blocked by a firewall</string>
+    <string name="ice_only_stun">⚠️ STUN only: most home broadband works, but cross-carrier or symmetric NAT will still fail. Configure TURN</string>
+    <string name="ice_only_host">⚠️ Local candidates only: works on the same Wi-Fi, fails over the internet (missing STUN/TURN)</string>
+    <string name="ice_none">❌ No candidates at all: check the network, or the address is wrong</string>
+
+    <!-- Chat top bar menu -->
+    <string name="menu_call_voice">Voice call</string>
+    <string name="menu_call_video">Video call</string>
+    <string name="menu_safety">Safety code</string>
+    <string name="menu_safety_verified">Safety code (verified)</string>
+    <string name="menu_panic">Panic wipe</string>
+
+    <!-- Voice / recording -->
+    <string name="mic_ok">Now hold the mic to talk</string>
+    <string name="mic_denied">No microphone permission — voice notes unavailable</string>
+    <string name="voice_too_short">Too short to send</string>
+    <string name="voice_record_failed">Recording failed (the mic may be in use)</string>
+    <string name="voice_empty">The recording is empty — try again</string>
+    <string name="voice_busy_call">Cannot record during a call</string>
+
+    <!-- Files -->
+    <string name="file_gone">This file is no longer on this device</string>
+    <string name="file_save_failed">Save failed</string>
+    <string name="file_saved_to">Saved to %1$s</string>
+    <string name="file_dir_download">Download/%1$s</string>
+    <string name="file_save_check_storage">Save failed — check storage</string>
+    <string name="file_default_name">File</string>
+    <string name="file_unreadable">Cannot read this file</string>
+    <string name="file_no_size">Cannot read the file size — try another one</string>
+    <string name="file_too_big">File exceeds the %1$d MB limit</string>
+    <string name="file_open">Open</string>
+    <string name="file_save_again">Save to Downloads again</string>
+    <string name="file_save_device">Save to device</string>
+    <string name="file_save_as">Save as…</string>
+    <string name="file_already_at">Already in %1$s</string>
+    <string name="file_gone_hint">This file is not on this device (older messages kept no copy). Ask them to resend.</string>
+
+    <!-- Media -->
+    <string name="media_image">Image</string>
+    <string name="image_process_failed">Failed to process this image</string>
+    <string name="video_unreadable">Cannot read this video</string>
+
+    <!-- Camera -->
+    <string name="camera_no_photo">The camera returned no photo — try again</string>
+    <string name="camera_unreadable">Cannot read the captured photo</string>
+    <string name="camera_bad_provider">Camera channel not configured (FileProvider)</string>
+    <string name="camera_no_app">No camera app available on this device</string>
+    <string name="camera_perm_missing">Camera permission missing — enable it in system settings</string>
+
+    <!-- Message actions -->
+    <string name="resend_failed">Resend failed</string>
+    <string name="recall_failed">Recall failed</string>
+    <string name="del_msgs_title">Delete these %1$d messages?</string>
+    <string name="del_msgs_body">Only your local history and file copies are deleted — the other side is unaffected. This cannot be undone.</string>
+    <string name="forward_title">Forward %1$d messages to</string>
+    <string name="forward_empty">No other contacts to forward to</string>
+    <string name="forwarded_n">Forwarded %1$d</string>
+    <string name="action_forward">Forward</string>
+    <string name="action_copy">Copy</string>
+    <string name="copied_n">Copied %1$d</string>
+    <string name="copied_no_text">No text in the selected messages</string>
+    <string name="action_share">Share</string>
+
+    <!-- Chat screen -->
+    <string name="chat_empty">No messages yet. Say something.</string>
+    <string name="stranger_add_hint">They added you, but they are not in your contacts yet. Add them as a contact to reply.</string>
+    <string name="stranger_no_clue">This message has no reply clue (it may be from an older client) and cannot be replied to for now. Ask them to send a new message.</string>
+    <string name="stranger_add_reply">Add as contact and reply</string>
+    <string name="input_hint">Message</string>
+    <string name="action_send">Send</string>
+
+    <!-- Attach panel -->
+    <string name="attach_camera">Camera</string>
+    <string name="attach_image">Images</string>
+    <string name="attach_video">Videos</string>
+    <string name="attach_file">Files</string>
+    <string name="burn_title">Burn after reading</string>
+    <string name="burn_off">Off</string>
+    <string name="burn_30s">30 s</string>
+    <string name="burn_5m">5 min</string>
+    <string name="burn_hint">The next message self-destructs after the other side has seen it (deleted on both ends).\nDoes not stop screenshots or screen recordings.</string>
+
+    <!-- Selection mode -->
+    <string name="sel_title_none">Select messages</string>
+    <string name="sel_title_n">%1$d selected</string>
+
+    <!-- Recovery phrase dialog -->
+    <string name="phrase_dlg_title">Recovery phrase</string>
+    <string name="phrase_dlg_warn_identity">These 12 words are your identity itself. Anyone who has them can impersonate you.</string>
+    <string name="phrase_dlg_warn_surveillance">Make sure nobody is around and no camera is watching.</string>
+    <string name="phrase_dlg_copy">Copy (clear the clipboard once you have written it down)</string>
+    <string name="phrase_dlg_loading">Loading…</string>
+    <string name="phrase_dlg_failed">Could not read it</string>
+    <string name="phrase_dlg_show">Show</string>
+
+    <!-- Relay picker -->
+    <string name="relay_pick_title">Choose a relay</string>
+    <string name="relay_pick_hint">Community-curated. The project does not endorse these and cannot guarantee availability. Tap one to fill it in.</string>
+    <string name="relay_pick_empty">The list is unavailable right now — just enter an address below.</string>
+    <string name="relay_pick_custom">Custom address</string>
+    <string name="relay_pick_use">Use this address</string>
+    <string name="action_close">Close</string>
+
+    <!-- Bubble long-press menu -->
+    <string name="menu_recall">Recall</string>
+    <string name="menu_multiselect">Select</string>
+    <string name="action_resend">Resend</string>
+    <string name="toast_copied">Copied</string>
+    <string name="share_text_chooser">Share this text</string>
+
+    <!-- Panic wipe -->
+    <string name="panic_title">Panic wipe</string>
+    <string name="panic_body">Session code %1$s (identical on both sides).\n\nOnce verified, this erases the chat history and files on BOTH sides (including saved copies), and clears the messages still stored on the relay. It cannot be undone; your identity and contacts are kept, and you can keep chatting afterwards.</string>
+    <string name="panic_answer_hint">Type the answer</string>
+    <string name="panic_attempts_left">%1$d attempts left</string>
+    <string name="panic_wrong">Wrong answer — here is a new one</string>
+    <string name="panic_confirm">Wipe</string>
+
+    <!-- Safety code -->
+    <string name="safety_title">Safety code with %1$s</string>
+    <string name="safety_hint">Read it out line by line, in person or over the phone. Only if the digits match exactly on both sides is there no third party in between.</string>
+    <string name="safety_no_key">Their identity key is not known yet. Wait until they send a message, then come back and check.</string>
+    <string name="safety_verified">✓ Verified</string>
+    <string name="safety_copied">Safety code copied</string>
+    <string name="safety_unverify">Undo verification</string>
+    <string name="safety_verify">I have verified it</string>
+
+    <!-- Media bubbles -->
+    <string name="media_gone_video">This video is no longer on this device</string>
+    <string name="media_gone_image">This image is no longer on this device</string>
+    <string name="media_kind_video">Video</string>
+    <string name="media_not_local">⚠ Not on this device</string>
+    <string name="media_loading">Loading…</string>
+
+    <!-- File bubble -->
+    <string name="file_state_saved">Saved to Downloads</string>
+    <string name="file_state_open">Tap to open</string>
+    <string name="file_state_absent">Not on this device</string>
+
+    <!-- Voice bubble -->
+    <string name="voice_gone">This voice message is no longer on this device</string>
+    <string name="voice_play_during_call">Do not play voice messages during a call</string>
+
+    <!-- Recording bar -->
+    <string name="rec_cancel_hint">Release to cancel</string>
+    <string name="rec_send_hint">Release to send · swipe up to cancel</string>
+
+    <!-- Send progress -->
+    <string name="tx_compress_image">Compressing the image…</string>
+    <string name="tx_read_video">Reading the video…</string>
+    <string name="tx_voice">Sending voice  %1$d%%</string>
+    <string name="tx_image">Sending image  %1$d%%</string>
+    <string name="tx_video">Sending video  %1$d%%   %2$s / %3$s</string>
+    <string name="tx_file">Sending %1$s  %2$d%%   %3$s / %4$s</string>
+
+    <!-- Receive progress -->
+    <string name="rx_voice">🎤 Receiving voice  %1$d%%</string>
+    <string name="rx_image">🖼 Receiving image  %1$d%%</string>
+    <string name="rx_video">🎬 Receiving video  %1$d%%   %2$s / %3$s</string>
+    <string name="rx_file">📄 Receiving %1$s  %2$d%%   %3$s / %4$s</string>
+
+    <!-- Misc -->
+    <string name="file_no_app">No app can open this file — try “Save as…”</string>
+    <string name="media_gesture_hint">Pinch to zoom · double-tap to magnify · tap to close</string>
+    <string name="qr_close">Close scanner</string>
+
+    <!-- Conversation list preview -->
+    <string name="preview_file_generic">📄 File</string>
+    <string name="preview_file_named">📄 %1$s</string>
+    <string name="preview_voice">🎤 Voice %1$s</string>
+    <string name="preview_image">[Image]</string>
+    <string name="preview_video">[Video]</string>
+    <string name="preview_failed">%1$s (not sent)</string>
+    <string name="recall_note_mine">You recalled a message</string>
+    <string name="recall_note_peer">They recalled a message</string>
+
+    <!-- Date format (SimpleDateFormat patterns; localised) -->
+    <string name="ts_fmt_day">MMM d, HH:mm</string>
+    <string name="ts_fmt_time">HH:mm</string>
+    <string name="media_too_big">This video is %1$s, over the %2$d MB channel limit. Trim it to a few seconds (or lower the quality) and send it again.</string>
+
+    <!-- Stranger (unverified peer) naming -->
+    <string name="stranger_prefix">Stranger %1$s</string>
+    <string name="unknown_contact">Unknown contact</string>
+
+    <!-- Share chooser -->
+    <string name="share_file_chooser">Send to</string>
+
+    <!-- Data-layer errors (kind → text mapping lives in UiErrors.kt) -->
+    <string name="err_relay_not_set">Set a relay address in Settings first</string>
+    <string name="err_relay_or_identity_missing">No relay or identity configured yet</string>
+    <string name="err_resend_too_old">This message is too old to resend</string>
+    <string name="err_recall_not_outgoing">You can only recall your own messages</string>
+    <string name="err_recall_no_rid">This message cannot be recalled</string>
+    <string name="err_recall_window_passed">The 10-minute recall window has passed</string>
+    <string name="err_recall_failed">Recall failed</string>
+    <string name="err_forward_no_file">Nothing to forward (the file copies may be gone from this device)</string>
+    <string name="err_file_empty">Empty file — nothing to send</string>
+    <string name="err_file_too_big">File exceeds the %1$d MB channel limit</string>
+    <string name="err_file_send_failed">Send failed: %1$s</string>
+    <string name="err_img_size_unknown">Could not read this image</string>
+    <string name="err_img_unreadable">Cannot decode this image (possibly an unsupported format like HEIC) — try another one</string>
+    <string name="err_img_pixels_too_many">This image has too many pixels (%1$s) — try another one</string>
+    <string name="err_img_decode_failed">Cannot decode this image (out of memory or unsupported format) — try another one</string>
+    <string name="err_img_compress_failed">Failed to compress this image — try another one</string>
+    <string name="err_img_still_too_big">Still %1$s after compression — too large to send</string>
+    <string name="err_video_size_unknown">Could not read this video\'s size — try another one</string>
+    <string name="err_video_unreadable">Cannot read this video (codec may be unsupported) — try another one</string>
+    <string name="err_rec_already">Already recording</string>
+    <string name="err_rec_open_failed">Could not open the microphone: %1$s</string>
+    <string name="err_add_no_clue">No reply clue from them (it may come from an older client). Ask them to send a new message.</string>
+    <string name="err_add_failed">Adding failed</string>
+    <string name="err_unknown">Unknown error</string>
+    <string name="err_core">Operation failed</string>
+    <string name="err_core_detail">Operation failed: %1$s</string>
+
+    <!-- Call log (persisted as structured JSON; rendered here per locale) -->
+    <string name="calllog_declined_me">You declined the call</string>
+    <string name="calllog_no_answer_me">No one answered</string>
+    <string name="calllog_ongoing">Call %1$s</string>
+    <string name="calllog_cancelled">Cancelled</string>
+    <string name="calllog_ended">Call ended</string>
+
+    <!-- Messaging service notifications -->
+    <string name="msg_svc_channel">Keep alive</string>
+    <string name="msg_svc_channel_desc">Keeps the connection alive to receive messages</string>
+    <string name="msg_svc_title">Receiving messages</string>
+    <string name="msg_svc_text_ok">Connection established</string>
+    <string name="msg_svc_text_battery">Allow the battery optimisation exemption, or the connection drops when the screen is off</string>
+    <string name="msg_channel">New messages</string>
+    <string name="msg_channel_desc">Alerts for new messages (with sound and vibration)</string>
+    <string name="notif_new_message">New message</string>
+    <string name="notif_burn_body">Burn-after-read message — open to view (it disappears afterwards)</string>
+    <string name="notif_blob_body">Sent you an attachment</string>
+
+    <string name="err_call_mic_failed">Could not open the microphone</string>
+    <string name="err_call_build_failed">Could not establish the call</string>
+    <string name="err_call_step_failed">Call setup failed: %1$s</string>
+    <string name="err_call_renegotiate_failed">Renegotiation failed: %1$s</string>
+    <string name="err_call_reconnect_failed">Reconnect failed: %1$s</string>
+    <string name="err_call_negotiate_failed">Negotiation failed: %1$s</string>
+    <string name="err_call_network_down">Network is down — cannot establish the media channel</string>
+</resources>
