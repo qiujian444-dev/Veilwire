@@ -39,12 +39,22 @@ pub struct OfferBody {
     /// 不加这个标志，对端会把重协商当成新来电，正在说的话就被打断了。
     #[serde(default)]
     pub restart: bool,
+    /// 重新协商的代际号。0 = 首次协商或旧版客户端；每次重协商 +1。
+    ///
+    /// 为什么要这个：换网络后双方会各自发起重协商，旧代际的 SDP / ICE candidate
+    /// 可能迟到到达。没有代际号时它们会被当成当前代际应用，
+    /// 表现是"通话接通了但两边都没声音"——媒体通道被旧候选带偏了。
+    #[serde(default)]
+    pub gen: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AnswerBody {
     pub call_id: String,
     pub sdp: String,
+    /// 应答对应的代际号，必须与收到的 offer 一致；不一致说明是旧代际的应答
+    #[serde(default)]
+    pub gen: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +66,9 @@ pub struct IceBody {
     pub mid: String,
     #[serde(default)]
     pub mline: i32,
+    /// 候选所属代际。低于当前代际的候选来自上一条网络路径，必须丢弃。
+    #[serde(default)]
+    pub gen: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -138,6 +151,16 @@ pub struct Call {
     seen: Vec<String>,
     /// 正在重新协商（ICE restart）。通话仍是 Active，只是媒体通道要重建。
     renegotiating: bool,
+    /// 当前媒体代际。0 = 首次协商；每次重新协商由发起方 +1，另一方采纳。
+    gen: u64,
+    /// 我方已发出 offer、正在等待的应答代际。None = 没有在等我方应答。
+    /// 用途：放弃自己的 offer（对端代际更高时让路）后，迟到的应答必须被丢弃。
+    awaiting: Option<u64>,
+    /// 对方已走到的最新代际，用于拒绝重放 / 回退的旧 offer
+    peer_gen: u64,
+    /// 本通电话我是主叫吗？双方同时重新协商时用它破僵局（主叫赢）。
+    /// 用角色而不是身份比较：双方角色天然互补，不需要额外交换任何东西。
+    caller: bool,
 }
 
 impl Default for Call {
@@ -157,6 +180,10 @@ impl Call {
             reason: String::new(),
             seen: Vec::new(),
             renegotiating: false,
+            gen: 0,
+            awaiting: None,
+            peer_gen: 0,
+            caller: false,
         }
     }
 
@@ -177,6 +204,10 @@ impl Call {
     }
     pub fn renegotiating(&self) -> bool {
         self.renegotiating
+    }
+    /// 当前媒体代际（调试 / 测试用）
+    pub fn gen(&self) -> u64 {
+        self.gen
     }
 
     fn enter(&mut self, st: State, now: u64) {
@@ -239,23 +270,34 @@ impl Call {
         self.reason.clear();
         self.seen.clear();
         self.renegotiating = false;
+        // 新的一通电话：代际从 0 开始。
+        // 这里就把 awaiting 置上：`start_outgoing` 的语义就是"我要发 offer 并等应答"，
+        // 真实调用方拿到 SDP 之前也可能收到应答（极快返回），不能等到
+        // make_offer_actions 才登记，否则那条应答会被当成过期丢掉。
+        self.gen = 0;
+        self.awaiting = Some(0);
+        self.peer_gen = 0;
+        self.caller = true;
         self.enter(State::Outgoing, now);
         Ok(vec![self.state_action()])
     }
 
     /// 本端拿到本地 SDP 后，产出要发出去的 offer
-    pub fn make_offer_actions(&self, sdp: &str) -> Vec<Action> {
+    pub fn make_offer_actions(&mut self, sdp: &str) -> Vec<Action> {
         if self.state != State::Outgoing {
             return Vec::new();
         }
         if sdp.len() > MAX_SDP_LEN {
             return Vec::new();
         }
+        // 首次 offer 也要记"在等应答"，这样旧代际的应答能被识别并丢弃
+        self.awaiting = Some(self.gen);
         let body = OfferBody {
             call_id: self.call_id.clone(),
             sdp: sdp.to_string(),
             video: self.video,
             restart: false,
+            gen: self.gen,
         };
         vec![Action::Send {
             to_dh: self.peer_dh.clone(),
@@ -269,6 +311,7 @@ impl Call {
         let body = AnswerBody {
             call_id: self.call_id.clone(),
             sdp: sdp.to_string(),
+            gen: self.gen,
         };
         vec![Action::Send {
             to_dh: self.peer_dh.clone(),
@@ -285,11 +328,15 @@ impl Call {
             return Vec::new();
         }
         self.renegotiating = true;
+        // 每发起一次重协商就推进代际：旧代际的 SDP / candidate / answer 从此失效
+        self.gen += 1;
+        self.awaiting = Some(self.gen);
         let body = OfferBody {
             call_id: self.call_id.clone(),
             sdp: sdp.to_string(),
             video: self.video,
             restart: true,
+            gen: self.gen,
         };
         vec![
             Action::Send {
@@ -314,6 +361,7 @@ impl Call {
             candidate: candidate.to_string(),
             mid: mid.to_string(),
             mline,
+            gen: self.gen,
         };
         vec![Action::Send {
             to_dh: self.peer_dh.clone(),
@@ -344,6 +392,30 @@ impl Call {
                 // 旧通话的重协商、或还没接通就要重协商：都不合理，忽略
                 return Vec::new();
             }
+
+            // 旧代际（重放 / 迟到）直接丢：否则会把已经重建好的媒体通道退回上一条网络路径
+            if body.gen != 0 && body.gen <= self.peer_gen {
+                return Vec::new();
+            }
+
+            // 双方同时换网络会各自发重协商（glare）。规则：
+            //   1. 对端代际更高 → 我方让路，放弃自己那个还没被应答的 offer
+            //   2. 代际相同 → 主叫赢，被叫让路
+            // 让路时清掉 `awaiting`，这样迟到的"对我方 offer 的应答"会被拒绝。
+            if body.gen != 0 {
+                if body.gen > self.gen {
+                    self.gen = body.gen;
+                    self.awaiting = None;
+                } else if body.gen == self.gen && self.awaiting.is_some() {
+                    if self.caller {
+                        // 我是主叫：我的 offer 优先，忽略对方的
+                        return Vec::new();
+                    }
+                    self.awaiting = None;
+                }
+                self.peer_gen = body.gen;
+            }
+
             self.renegotiating = true;
             return vec![self.state_action()];
         }
@@ -370,6 +442,11 @@ impl Call {
         self.peer_dh = from_dh.to_string();
         self.video = body.video;
         self.reason.clear();
+        self.renegotiating = false;
+        self.gen = 0;
+        self.awaiting = None;
+        self.peer_gen = 0;
+        self.caller = false;
         self.enter(State::Incoming, now);
         vec![self.state_action()]
     }
@@ -385,6 +462,7 @@ impl Call {
             return Vec::new();
         }
         self.renegotiating = false;
+        self.awaiting = None;
         self.enter(State::Active, now);
         let mut v = vec![self.state_action()];
         v.extend(self.make_answer_actions(sdp));
@@ -437,6 +515,22 @@ impl Call {
         if body.sdp.len() > MAX_SDP_LEN {
             return Vec::new();
         }
+
+        // 代际校验：只接受"对我方当前这个 offer"的应答。
+        //
+        // 这是整个代际机制的核心。没有它会发生什么：我方连发两次重协商，
+        // 第一次的应答迟到到达，被当成第二次的应答应用 —— 本地描述装的是
+        // 上一条网络路径的 SDP，媒体通道就此错位，用户听到的是"接通了但没声音"。
+        //
+        // 严格相等，不给 gen==0 开后门：早期实现试过"gen 为 0 就放行（兼容旧版）"，
+        // 结果第一个用例就挂了——gen=0 的旧应答正好能穿过这道口子，
+        // 代际防护等于没做。旧版对端的首次通话 gen 全是 0，仍然正常。
+        if self.awaiting != Some(body.gen) {
+            return Vec::new();
+        }
+
+        self.awaiting = None;
+        self.peer_gen = body.gen;
         self.renegotiating = false;
         self.enter(State::Active, now);
         vec![self.state_action()]
@@ -452,6 +546,14 @@ impl Call {
             return None;
         }
         if body.candidate.len() > MAX_CANDIDATE_LEN {
+            return None;
+        }
+
+        // 丢弃旧代际的候选：它们指向换网络之前的那条路径。
+        // 把它们 addIceCandidate 进去会把新通道的选路带偏，典型症状是
+        // "ICE 显示 connected，但音频一直不出声"。
+        // 同样是严格比较：首次通话双方 gen 都是 0，不影响正常流程。
+        if body.gen < self.gen {
             return None;
         }
         Some(body.clone())
@@ -562,6 +664,7 @@ mod tests {
             sdp: "v=0 fake-sdp".into(),
             video: false,
             restart: false,
+            gen: 0,
         }
     }
 
@@ -571,6 +674,7 @@ mod tests {
             sdp: "v=0 restart-sdp".into(),
             video: false,
             restart: true,
+            gen: 0,
         }
     }
 
@@ -578,6 +682,7 @@ mod tests {
         AnswerBody {
             call_id: id.into(),
             sdp: "v=0 fake-answer".into(),
+            gen: 0,
         }
     }
 
@@ -646,7 +751,9 @@ mod tests {
         a.on_answer(B, &answer("c1"), 101);
         a.make_restart_offer_actions("v=0 restart");
 
-        let acts = a.on_answer(B, &answer("c1"), 200);
+        // 重协商的应答必须带当前代际（1）。用 gen=0 的应答在这里已经属于
+        // 过期信令，会被丢弃——这正是代际防护要的效果，见 stale_answer_* 用例。
+        let acts = a.on_answer(B, &answer_gen("c1", 1), 200);
         assert_eq!(a.state(), State::Active);
         assert!(matches!(
             acts.first(),
@@ -823,6 +930,7 @@ mod tests {
             candidate: "candidate:1 1 UDP 2130706431 192.168.1.2 5000 typ host".into(),
             mid: "audio".into(),
             mline: 0,
+            gen: 0,
         };
         let got = a.on_ice(B, &ice).expect("answer 之前的 ICE 也要转发");
         assert_eq!(got.candidate, ice.candidate);
@@ -839,6 +947,7 @@ mod tests {
             candidate: "x".into(),
             mid: String::new(),
             mline: 0,
+            gen: 0,
         };
         assert!(a.on_ice("dh_carol", &ice).is_none());
     }
@@ -887,6 +996,7 @@ mod tests {
             sdp: "x".repeat(MAX_SDP_LEN + 1),
             video: false,
             restart: false,
+            gen: 0,
         };
         assert!(b.on_offer(A, &big, "m1", 100).is_empty());
         assert_eq!(b.state(), State::Idle, "超长 SDP 不能改变状态");
@@ -908,5 +1018,158 @@ mod tests {
         o.video = true;
         b.on_offer(A, &o, "m1", 101);
         assert!(b.video(), "被叫要知道这是视频电话");
+    }
+
+    // ================================================================
+    // 代际防护（generation）—— 换网络后"接通了但没声音"的根因
+    // ================================================================
+
+    fn restart_offer_gen(id: &str, gen: u64) -> OfferBody {
+        OfferBody {
+            call_id: id.into(),
+            sdp: "v=0 restart-sdp".into(),
+            video: false,
+            restart: true,
+            gen,
+        }
+    }
+
+    fn answer_gen(id: &str, gen: u64) -> AnswerBody {
+        AnswerBody {
+            call_id: id.into(),
+            sdp: "v=0 fake-answer".into(),
+            gen,
+        }
+    }
+
+    fn ice_gen(id: &str, gen: u64) -> IceBody {
+        IceBody {
+            call_id: id.into(),
+            candidate: "candidate:1 1 UDP 1 10.0.0.1 1000 typ host".into(),
+            mid: "audio".into(),
+            mline: 0,
+            gen,
+        }
+    }
+
+    /// 把通话推进到 Active（主叫视角）
+    fn active_as_caller() -> Call {
+        let mut a = Call::new();
+        a.start_outgoing("c1", B, false, 100).unwrap();
+        a.make_offer_actions("v=0 sdp");
+        let acts = a.on_answer(B, &answer_gen("c1", 0), 101);
+        assert!(!acts.is_empty(), "首个应答应当被接受");
+        assert_eq!(a.state(), State::Active);
+        a
+    }
+
+    /// 迟到的旧代际应答必须丢弃，否则本地描述会装成上一条网络路径的 SDP
+    #[test]
+    fn stale_answer_for_older_generation_is_dropped() {
+        let mut a = active_as_caller();
+        a.make_restart_offer_actions("v=0 restart");
+        assert_eq!(a.gen(), 1, "重协商应当把代际推进到 1");
+
+        // 第一次重协商的应答（gen=0）迟到
+        let acts = a.on_answer(B, &answer_gen("c1", 0), 200);
+        assert!(acts.is_empty(), "旧代际应答不能被应用");
+        assert!(a.renegotiating(), "仍在等待当前代际的应答");
+
+        // 当前代际的应答才生效
+        let acts = a.on_answer(B, &answer_gen("c1", 1), 201);
+        assert!(!acts.is_empty());
+        assert!(!a.renegotiating());
+    }
+
+    /// 换网络前的 ICE candidate 不能再喂给新的 PeerConnection
+    #[test]
+    fn stale_ice_from_older_generation_is_dropped() {
+        let mut a = active_as_caller();
+        a.make_restart_offer_actions("v=0 restart"); // gen -> 1
+        a.on_answer(B, &answer_gen("c1", 1), 200);
+
+        assert!(
+            a.on_ice(B, &ice_gen("c1", 0)).is_none(),
+            "gen=0 的候选属于旧路径，必须丢弃"
+        );
+        assert!(
+            a.on_ice(B, &ice_gen("c1", 1)).is_some(),
+            "当前代际的候选要放行"
+        );
+        // 也不给 gen=0 开后门：它同样属于旧路径
+        assert!(
+            a.on_ice(B, &ice_gen("c1", 0)).is_none(),
+            "gen=0 也是旧代际，必须丢弃"
+        );
+    }
+
+    /// 重复/重放的旧重协商 offer 必须忽略（否则媒体通道被退回旧路径）
+    #[test]
+    fn replayed_restart_offer_is_ignored() {
+        let mut b = Call::new();
+        b.on_offer(A, &offer("c1"), "m1", 100);
+        b.accept("v=0 ans", 101);
+
+        let acts = b.on_offer(A, &restart_offer_gen("c1", 2), "m2", 200);
+        assert!(!acts.is_empty(), "更高代际要接受");
+        assert_eq!(b.gen(), 2);
+
+        let acts = b.on_offer(A, &restart_offer_gen("c1", 2), "m3", 201);
+        assert!(acts.is_empty(), "同一代际重复到达要忽略");
+
+        let acts = b.on_offer(A, &restart_offer_gen("c1", 1), "m4", 202);
+        assert!(acts.is_empty(), "更低代际要忽略");
+    }
+
+    /// 对端代际更高时我方让路：放弃自己等待中的 offer
+    #[test]
+    fn lower_generation_yields_to_higher() {
+        let mut a = active_as_caller();
+        a.make_restart_offer_actions("v=0 mine"); // 我方 gen=1，等待应答
+        assert!(a.renegotiating());
+
+        // 对端已经走到 gen=3
+        let acts = a.on_offer(B, &restart_offer_gen("c1", 3), "m9", 300);
+        assert!(!acts.is_empty(), "要让路并准备应答");
+        assert_eq!(a.gen(), 3, "代际要采纳对方的");
+
+        // 我方那个被放弃的 offer 的应答现在回来，必须丢弃
+        let acts = a.on_answer(B, &answer_gen("c1", 1), 301);
+        assert!(acts.is_empty(), "已放弃的 offer 的应答不能应用");
+    }
+
+    /// 双方同时重协商：主叫赢，被叫让路（双方算出的结果一致，不会互相等死）
+    #[test]
+    fn glare_equal_generation_caller_wins() {
+        // 主叫视角
+        let mut caller = active_as_caller();
+        caller.make_restart_offer_actions("v=0 callers"); // gen=1
+        let acts = caller.on_offer(B, &restart_offer_gen("c1", 1), "m1", 200);
+        assert!(acts.is_empty(), "主叫应当忽略被叫的对等重协商");
+        assert_eq!(caller.gen(), 1);
+        let acts = caller.on_answer(B, &answer_gen("c1", 1), 201);
+        assert!(!acts.is_empty(), "主叫的 offer 仍然会被应答并生效");
+
+        // 被叫视角
+        let mut callee = Call::new();
+        callee.on_offer(A, &offer("c1"), "m0", 100);
+        callee.accept("v=0 ans", 101);
+        callee.make_restart_offer_actions("v=0 callees"); // 被叫也 gen=1
+        let acts = callee.on_offer(A, &restart_offer_gen("c1", 1), "m1", 200);
+        assert!(!acts.is_empty(), "被叫应当让路，准备应答主叫的 offer");
+        let acts = callee.on_answer(A, &answer_gen("c1", 1), 201);
+        assert!(acts.is_empty(), "让路后自己那个应答不能再应用");
+    }
+
+    /// 旧版本对端（不带代际号）仍然能正常重协商
+    #[test]
+    fn legacy_peer_without_generation_still_works() {
+        let mut b = Call::new();
+        b.on_offer(A, &offer("c1"), "m1", 100);
+        b.accept("v=0 ans", 101);
+        // 旧版对端发来的重协商：gen 缺省为 0
+        let acts = b.on_offer(A, &restart_offer("c1"), "m2", 200);
+        assert!(!acts.is_empty(), "旧版重协商必须照旧工作");
+        assert!(b.renegotiating());
     }
 }
