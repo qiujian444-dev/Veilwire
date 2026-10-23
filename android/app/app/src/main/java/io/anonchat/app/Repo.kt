@@ -187,6 +187,25 @@ data class PeerCard(
     val verifiedCode: String = "",
 )
 
+/**
+ * 中继签发的 TURN 临时凭据。
+ *
+ * 为什么要临时凭据而不是固定账号：DHT 只公布 TURN 的 IP 和端口
+ * （BEP5 记录固定 6 字节），放不下账号密码；而固定凭据硬编码进 App
+ * 等于把 TURN 变成公开免费中继。所以由中继在 WS 通道里按需签发，
+ * 过期自动作废，也能按账号限速。
+ */
+data class TurnCredsData(
+    val url: String,
+    val user: String,
+    val pass: String,
+    val ttl: Long,
+    val expiresAt: Long,
+) {
+    /** 剩余有效秒数 */
+    val remaining: Long get() = (expiresAt - System.currentTimeMillis() / 1000).coerceAtLeast(0)
+}
+
 /** Rust 侧通话状态机交回的事件 */
 data class CallEvent(
     val state: String,
@@ -532,6 +551,27 @@ object Repo {
      * 再决定要不要采用（采用要走 [setRelay]）。
      * 阻塞式调用，必须在 IO 线程。
      */
+    /**
+     * 中继下发的 TURN 临时凭据。
+     *
+     * 中继没开 TURN、或网络不通时返回 null：调用方应当回退到用户手填的配置。
+     * 阻塞式调用（可能连一次中继），必须在 IO 线程。
+     */
+    fun turnCreds(): Res<TurnCredsData?> {
+        val (d, e) = envelope(Native.turnCreds(dir))
+        if (d !is JSONObject) return Res(null, e)
+        return Res(
+            TurnCredsData(
+                url = d.optString("url"),
+                user = d.optString("user"),
+                pass = d.optString("pass"),
+                ttl = d.optLong("ttl"),
+                expiresAt = d.optLong("expires_at"),
+            ),
+            e,
+        )
+    }
+
     fun discoverRelays(timeoutSecs: Long = 25): Res<List<String>> {
         val (d, e) = envelope(Native.discoverRelays(dir, timeoutSecs))
         if (d !is JSONArray) return Res(emptyList(), e)

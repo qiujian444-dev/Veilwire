@@ -107,6 +107,14 @@ object Native {
      */
     external fun discoverRelays(dir: String, timeoutSecs: Long): String
 
+    /**
+     * 取 TURN 临时凭据（缓存优先，不足 5 分钟才向中继重新索取）。
+     *
+     * 返回 `{url,user,pass,ttl,expires_at}`，或 `null`（中继没开 TURN / 网络不通）。
+     * 会发起网络请求，必须在后台线程调用。
+     */
+    external fun turnCreds(dir: String): String
+
     /** 取走 Rust 侧告警（解密失败、信令发送失败等），调用后清空 */
     external fun takeWarnings(): String
 

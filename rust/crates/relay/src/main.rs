@@ -100,6 +100,11 @@ struct State {
     log: Log,
     /// 每连接每分钟最多投递多少条。0 = 不限制（仅测试用）
     rate_limit: u32,
+    /// 对外公布的 TURN 地址（`turn:1.2.3.4:3478`）。None = 没开 TURN。
+    ///
+    /// 客户端通过 `GetTurn` 帧来取：DHT 里只能放 IP+端口，
+    /// 账号密码放不进去，所以凭据必须走这条已建立的加密通道。
+    turn_url: Option<String>,
 }
 
 impl Default for State {
@@ -109,6 +114,7 @@ impl Default for State {
             subs: HashMap::new(),
             log: Log::memory(),
             rate_limit: 120,
+            turn_url: None,
         }
     }
 }
@@ -150,6 +156,8 @@ async fn serve(args: &[String]) -> Result<()> {
         subs: HashMap::new(),
         log,
         rate_limit,
+        // TURN 还没配置，稍后若开启会补上
+        turn_url: None,
     };
     let expired = st0.sweep();
     let n_queues = st0.queues.len();
@@ -174,6 +182,7 @@ async fn serve(args: &[String]) -> Result<()> {
     // 不传 --turn 时行为与旧版完全一致（纯 WS 中继），方便回退。
     // 传了就必须给全：外网 IP（NAT 通告）、账号密码（不做匿名 TURN，否则等于开放代理）。
     let mut turn_port_for_dht: Option<u16> = None;
+    let mut turn_url: Option<String> = None;
     if let Some(turn_addr) = opt(args, "--turn") {
         let listen: SocketAddr = turn_addr
             .parse()
@@ -207,6 +216,8 @@ async fn serve(args: &[String]) -> Result<()> {
         let allow_private_peers = args.iter().any(|a| a == "--turn-allow-private-peers");
         let mut users = HashMap::new();
         users.insert(user, pass);
+        // 记下对外地址：客户端索取凭据时要连带告诉它连哪儿
+        turn_url = Some(format!("turn:{ext_ip}:{}", listen.port()));
         let cfg = turn::Config {
             listen,
             external_ip: ext_ip,
@@ -222,6 +233,11 @@ async fn serve(args: &[String]) -> Result<()> {
                 eprintln!("[turn] 服务退出: {e:#}");
             }
         });
+    }
+    if let Some(u) = turn_url.clone() {
+        // 客户端索取凭据时要连带告诉它连哪个地址
+        state.lock().await.turn_url = Some(u.clone());
+        println!("[turn] 客户端可通过 WS 索取临时凭据，对外地址 {u}（TTL 1 小时）");
     }
 
     // ---- Mainline DHT 自注册（可选，默认关闭）
@@ -511,6 +527,36 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
 
             ClientFrame::Ping => {
                 let _ = tx.send(ServerFrame::Pong);
+            }
+
+            // 通话前索取 TURN 临时凭据。
+            //
+            // 每次请求都现签发一组新的：客户端换网络重连时会再来要，
+            // 旧的自然过期，不需要吊销逻辑。
+            ClientFrame::GetTurn => {
+                let url = {
+                    let st = state.lock().await;
+                    st.turn_url.clone()
+                };
+                match url {
+                    Some(url) => {
+                        let (user, pass, expires) = turn::auth::issue_ephemeral(3600);
+                        let ttl = expires.saturating_sub(proto::now_secs());
+                        let _ = tx.send(ServerFrame::TurnCreds {
+                            url,
+                            user,
+                            pass,
+                            ttl,
+                        });
+                    }
+                    // 没开 TURN：明确告诉客户端"别指望我"，让它回退到自填配置
+                    None => {
+                        let _ = tx.send(ServerFrame::err(
+                            "no_turn",
+                            "这个中继没有开启 TURN",
+                        ));
+                    }
+                }
             }
         }
     }

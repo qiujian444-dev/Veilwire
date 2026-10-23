@@ -444,6 +444,86 @@ pub fn discover_relays(dir: &str, timeout_secs: u64) -> Result<Vec<String>> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------- TURN 凭据
+
+/// 中继签发的临时 TURN 凭据。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnCreds {
+    /// 形如 `turn:1.2.3.4:3478`
+    pub url: String,
+    pub user: String,
+    pub pass: String,
+    /// 有效时长（秒）
+    pub ttl: u64,
+    /// 过期时刻（unix 秒）
+    pub expires_at: u64,
+}
+
+impl TurnCreds {
+    /// 剩余可用秒数；已过期返回 0
+    pub fn remaining(&self) -> u64 {
+        self.expires_at.saturating_sub(proto::now_secs())
+    }
+}
+
+const TURN_FILE: &str = "turn.json";
+
+fn load_turn(dir: &Path) -> Option<TurnCreds> {
+    let txt = std::fs::read_to_string(dir.join(TURN_FILE)).ok()?;
+    serde_json::from_str(&txt).ok()
+}
+
+fn save_turn(dir: &Path, c: &TurnCreds) -> Result<()> {
+    let p = dir.join(TURN_FILE);
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(c)?)?;
+    std::fs::rename(&tmp, &p)?;
+    Ok(())
+}
+
+/// 向当前中继索取一组临时 TURN 凭据（不读缓存）。
+///
+/// 为什么要"按需索取"而不是写死在 App 里：
+/// 把固定账号密码硬编码等于把 TURN 变成公开免费中继，必被滥用；
+/// 而 DHT 的 BEP5 记录只有 6 字节（IP+端口），根本放不下凭据。
+/// 走已经建立的 WS 连接，既能下发也能按账号限速 / 停用。
+pub fn fetch_turn_creds(dir: &str) -> Result<TurnCreds> {
+    let dir = PathBuf::from(dir);
+    let me = load_self(&dir)?;
+    let relay = me
+        .relays
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("还没有配置中继，无法索取 TURN 凭据"))?;
+    let creds = rt().block_on(async {
+        let mut c = Conn::connect(&relay).await?;
+        c.get_turn().await
+    })?;
+    save_turn(&dir, &creds)?;
+    Ok(creds)
+}
+
+/// 取一组可用的 TURN 凭据：缓存剩余时间不足 5 分钟就重新索取。
+///
+/// 网络失败但有旧缓存（哪怕快过期）时**仍然返回旧缓存**：
+/// 通话前为了拿凭据而阻塞十几秒，比用一个快过期的凭据更糟。
+pub fn turn_creds(dir: &str) -> Option<TurnCreds> {
+    let dir = PathBuf::from(dir);
+    let cached = load_turn(&dir);
+    if let Some(c) = &cached {
+        if c.remaining() > 300 {
+            return Some(c.clone());
+        }
+    }
+    match fetch_turn_creds(dir.to_str()?) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            warn(format!("索取 TURN 凭据失败，回退到缓存（如有）: {e:#}"));
+            cached.filter(|c| c.remaining() > 0)
+        }
+    }
+}
+
 /// 探测一个中继：完成 WebSocket 握手并计时，返回毫秒数。
 ///
 /// 用于首次启动的中继选择页：只验证"连得上"，不建队列不投递，
@@ -1445,6 +1525,24 @@ impl Conn {
             Ok(ServerFrame::Err { code, msg }) => Err(anyhow!("建队列失败 [{code}] {msg}")),
             Ok(other) => Err(anyhow!("建队列收到意外帧: {other:?}")),
             Err(RecvErr::Timeout) => Err(anyhow!("建队列超时")),
+            Err(RecvErr::Fatal(e)) => Err(e),
+        }
+    }
+
+    /// 索取 TURN 临时凭据。中继没开 TURN 时返回 Err（上层回退到用户自填配置）。
+    async fn get_turn(&mut self) -> Result<TurnCreds> {
+        self.send(&ClientFrame::GetTurn).await?;
+        match self.recv_frame(Duration::from_secs(10)).await {
+            Ok(ServerFrame::TurnCreds { url, user, pass, ttl }) => Ok(TurnCreds {
+                url,
+                user,
+                pass,
+                ttl,
+                expires_at: proto::now_secs() + ttl,
+            }),
+            Ok(ServerFrame::Err { code, msg }) => Err(anyhow!("中继不给 TURN [{}] {}", code, msg)),
+            Ok(other) => Err(anyhow!("索取 TURN 收到意外帧: {other:?}")),
+            Err(RecvErr::Timeout) => Err(anyhow!("索取 TURN 超时")),
             Err(RecvErr::Fatal(e)) => Err(e),
         }
     }

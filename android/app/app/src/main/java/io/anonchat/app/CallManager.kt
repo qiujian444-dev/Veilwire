@@ -124,6 +124,30 @@ object CallManager {
     @Volatile private var ticking = false
     private var connectedAt = 0L
 
+    /**
+     * 中继下发的 TURN 临时凭据（后台刷新，读取时同步取用）。
+     *
+     * 为什么不在这里同步请求：`iceServers()` 是在建 PeerConnection 的过程中调用的，
+     * 那是主线程路径，一次网络请求就会卡住 UI。所以后台线程提前拿好，
+     * 这里只读缓存；拿不到就回退到用户手填的配置。
+     */
+    @Volatile
+    private var autoTurn: TurnCredsData? = null
+
+    /** 后台刷新 TURN 凭据。可重复调用，代价很小（有缓存） */
+    fun refreshTurnCreds() {
+        Thread {
+            val r = Repo.turnCreds()
+            val c = r.data
+            if (c != null && c.remaining > 60) {
+                autoTurn = c
+                Log.i(TAG, "TURN credentials refreshed, ${c.remaining}s left")
+            } else if (c == null) {
+                Log.i(TAG, "no TURN credits from relay: ${r.error ?: "relay has no TURN"}")
+            }
+        }.apply { isDaemon = true; name = "turn-creds"; start() }
+    }
+
     // ------------------------------------------------------------ 初始化
 
     fun init(ctx: Context) {
@@ -141,6 +165,9 @@ object CallManager {
             .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglBase!!.eglBaseContext, true, true))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglBase!!.eglBaseContext))
             .createPeerConnectionFactory()
+
+        // 预热：App 起来就后台取一次，第一次打电话时不用等
+        refreshTurnCreds()
     }
 
     private fun newPeerConnection(): PeerConnection? {
@@ -170,14 +197,28 @@ object CallManager {
             .ifBlank { "stun:stun.miwifi.com:3478" }
         list.add(PeerConnection.IceServer.builder(stun).createIceServer())
 
-        val turn = prefs?.getString("turn", "")?.trim().orEmpty()
-        if (turn.isNotBlank()) {
-            val user = prefs?.getString("turn_user", "").orEmpty()
-            val pass = prefs?.getString("turn_pass", "").orEmpty()
-            // 用户可能填 turn://user:pass@host 或裸 host:port，统一归一成 WebRTC 认的写法
-            val b = PeerConnection.IceServer.builder(normalizeTurnUrl(turn))
-            if (user.isNotBlank()) b.setUsername(user).setPassword(pass)
+        // 优序：中继自动签发的临时凭据 > 用户手填的固定账号。
+        //
+        // 自动凭据过期就作废，泄露了影响窗口也有限；用户手填的那份仍然保留，
+        // 用于中继没开 TURN、或你自己搭了 coturn 的情况。
+        val auto = autoTurn
+        if (auto != null && auto.remaining > 30) {
+            val b = PeerConnection.IceServer.builder(normalizeTurnUrl(auto.url))
+                .setUsername(auto.user)
+                .setPassword(auto.pass)
             list.add(b.createIceServer())
+            // 快到期了顺手刷新一次，下次通话就能用新的（不阻塞当前流程）
+            if (auto.remaining < 300) refreshTurnCreds()
+        } else {
+            val turn = prefs?.getString("turn", "")?.trim().orEmpty()
+            if (turn.isNotBlank()) {
+                val user = prefs?.getString("turn_user", "").orEmpty()
+                val pass = prefs?.getString("turn_pass", "").orEmpty()
+                // 用户可能填 turn://user:pass@host 或裸 host:port，统一归一成 WebRTC 认的写法
+                val b = PeerConnection.IceServer.builder(normalizeTurnUrl(turn))
+                if (user.isNotBlank()) b.setUsername(user).setPassword(pass)
+                list.add(b.createIceServer())
+            }
         }
         return list
     }

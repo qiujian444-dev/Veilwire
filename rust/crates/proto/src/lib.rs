@@ -43,6 +43,12 @@ pub enum ClientFrame {
     Ack { qid: String, ids: Vec<String> },
     /// 心跳
     Ping,
+    /// 索取 TURN 临时凭据（通话前用）。
+    ///
+    /// 为什么不把凭据写进 DHT：BEP5 的每条记录固定 6 字节（IP + 端口），
+    /// 根本没有地方放账号密码；而把固定凭据硬编码进 App 等于把 TURN
+    /// 变成公开免费中继。所以做成"连上 WS 之后按需索取"。
+    GetTurn,
 }
 
 /// 中继 → 客户端
@@ -60,6 +66,16 @@ pub enum ServerFrame {
         ts: u64,
     },
     Pong,
+    /// TURN 临时凭据。`url` 形如 `turn:1.2.3.4:3478`，`ttl` 单位秒。
+    ///
+    /// 凭据是中继现签发的一次性账号，过期自动作废：这样即使泄露，
+    /// 影响窗口也是有限的，而且能按账号限速 / 封禁。
+    TurnCreds {
+        url: String,
+        user: String,
+        pass: String,
+        ttl: u64,
+    },
     Err { code: String, msg: String },
 }
 

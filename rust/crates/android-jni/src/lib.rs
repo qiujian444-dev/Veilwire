@@ -295,6 +295,26 @@ pub extern "system" fn Java_io_anonchat_core_Native_discoverRelays(
     })
 }
 
+/// 取 TURN 临时凭据（缓存优先，必要时向中继索取）。
+///
+/// 返回 `{url,user,pass,ttl,expires_at}` 或 `null`（中继没开 TURN / 网络不通）。
+/// 会发起一次网络请求，**必须在后台线程调用**。
+#[no_mangle]
+pub extern "system" fn Java_io_anonchat_core_Native_turnCreds(
+    mut env: JNIEnv,
+    _c: JClass,
+    dir: JString,
+) -> jstring {
+    let d = get_string(&mut env, &dir);
+    guard(&mut env, |_e| {
+        let v = client::turn_creds(&d);
+        Ok(match v {
+            Some(c) => serde_json::to_value(c).unwrap_or(Value::Null),
+            None => Value::Null,
+        })
+    })
+}
+
 /// 删除联系人：联系人条目 + Olm 会话状态一起清。返回 [是否存在, 清掉的会话数]。
 #[no_mangle]
 pub extern "system" fn Java_io_anonchat_core_Native_removeContact(
