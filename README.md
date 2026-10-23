@@ -75,6 +75,7 @@ relay.
 - Panic wipe behind an arithmetic challenge code
 - Safety-number comparison (60 digits) to detect a man in the middle
 - Deterministic avatars, dark mode, offline queueing, background delivery via foreground service
+- Relay discovery over the Mainline DHT (BEP5) — no relay address to type; opt-in per relay
 - Taking a photo from the composer and sending it directly (never written to the system gallery)
 
 ## Repository layout

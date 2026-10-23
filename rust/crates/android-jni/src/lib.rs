@@ -275,6 +275,26 @@ pub extern "system" fn Java_io_anonchat_core_Native_setRelay(
     })
 }
 
+/// 从 Mainline DHT 自动发现中继（BEP5 get_peers）。
+///
+/// 纯查询、不改任何本地配置：返回 `["ws://1.2.3.4:8443", ...]` 候选列表，
+/// 由上层决定是否采用。**必须在后台线程调用**（默认 25 秒量级）。
+#[no_mangle]
+pub extern "system" fn Java_io_anonchat_core_Native_discoverRelays(
+    mut env: JNIEnv,
+    _c: JClass,
+    dir: JString,
+    timeout_secs: jni::sys::jlong,
+) -> jstring {
+    let d = get_string(&mut env, &dir);
+    let t = timeout_secs.max(5) as u64;
+    guard(&mut env, |_e| {
+        client::discover_relays(&d, t)
+            .map(|v| json!(v))
+            .map_err(|e| format!("{e:#}"))
+    })
+}
+
 /// 删除联系人：联系人条目 + Olm 会话状态一起清。返回 [是否存在, 清掉的会话数]。
 #[no_mangle]
 pub extern "system" fn Java_io_anonchat_core_Native_removeContact(

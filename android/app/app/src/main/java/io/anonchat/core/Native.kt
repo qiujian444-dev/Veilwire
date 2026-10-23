@@ -99,6 +99,14 @@ object Native {
     /** 探测中继：WS 握手计时，返回毫秒 */
     external fun relayProbe(url: String): String
 
+    /**
+     * 从 Mainline DHT 自动发现中继（BEP5 get_peers）。
+     *
+     * 返回 JSON 数组（ws:// 地址）。**只查询、不改本地配置**，采用与否由上层决定。
+     * 会阻塞到超时（秒级到几十秒），必须在后台线程调用。
+     */
+    external fun discoverRelays(dir: String, timeoutSecs: Long): String
+
     /** 取走 Rust 侧告警（解密失败、信令发送失败等），调用后清空 */
     external fun takeWarnings(): String
 

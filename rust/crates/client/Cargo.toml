@@ -9,6 +9,8 @@ description = "客户端业务层（同步 API）：CLI 与 Android JNI 共用�
 proto = { path = "../proto" }
 identity = { path = "../identity" }
 secure = { path = "../secure" }
+# DHT 自动发现中继（与 relay 自注册共用）
+dht = { path = "../dht" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

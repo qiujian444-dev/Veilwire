@@ -125,6 +125,11 @@
     <string name="relay_loading">正在获取中继列表…</string>
     <string name="relay_empty_title">列表暂时拉不到</string>
     <string name="relay_empty_hint">可能是网络原因，也可能社区还没有收录节点。如果朋友给你搭了中继，直接在下面输入地址即可。</string>
+    <string name="relay_dht_discover">自动发现中继（DHT）</string>
+    <string name="relay_dht_discovering">正在搜索 DHT…</string>
+    <string name="relay_dht_hint">首次运行可能需要半分钟左右。不想等也可以直接填地址。</string>
+    <string name="relay_dht_none">DHT 上没有找到可用中继。稍后再试，或在下面手动填写地址。</string>
+    <string name="relay_dht_found">从 DHT 发现 %1$d 个中继</string>
     <string name="relay_region_unknown">地区未知</string>
     <string name="relay_probing">测速中…</string>
     <string name="relay_unreachable">不可达</string>

@@ -61,11 +61,15 @@ fn usage() {
     eprintln!(
         "用法:
   relay serve --addr 127.0.0.1:8080 [--data ./data] [--fsync] [--rate 120]
+              [--dht-announce [对外端口]] [--dht-interval 600]
               [--turn 0.0.0.0:3478 --turn-external-ip <公网IP>
                --turn-user <用户> --turn-pass <密码>
                --turn-realm anonchat --turn-port-min 49160 --turn-port-max 49200
                --turn-max-per-ip 8] [--turn-allow-private-peers]
-  relay load  --url ws://127.0.0.1:8080 [--clients 20] [--secs 60] [--ping 5]"
+  relay load  --url ws://127.0.0.1:8080 [--clients 20] [--secs 60] [--ping 5]
+
+  --dht-announce 把本中继公布到 BitTorrent Mainline DHT，客户端可自动发现。
+                  不跟端口时用 --addr 里的端口；反代场景请显式给对外端口（如 443）。"
     );
 }
 
@@ -169,10 +173,12 @@ async fn serve(args: &[String]) -> Result<()> {
     //
     // 不传 --turn 时行为与旧版完全一致（纯 WS 中继），方便回退。
     // 传了就必须给全：外网 IP（NAT 通告）、账号密码（不做匿名 TURN，否则等于开放代理）。
+    let mut turn_port_for_dht: Option<u16> = None;
     if let Some(turn_addr) = opt(args, "--turn") {
         let listen: SocketAddr = turn_addr
             .parse()
             .map_err(|_| anyhow!("--turn 格式应为 ip:port"))?;
+        turn_port_for_dht = Some(listen.port());
         let ext_ip: std::net::IpAddr = opt(args, "--turn-external-ip")
             .ok_or_else(|| anyhow!("--turn 需要同时给 --turn-external-ip（NAT 后的公网 IP）"))?
             .parse()
@@ -216,6 +222,36 @@ async fn serve(args: &[String]) -> Result<()> {
                 eprintln!("[turn] 服务退出: {e:#}");
             }
         });
+    }
+
+    // ---- Mainline DHT 自注册（可选，默认关闭）
+    //
+    // 开了之后中继会把自己公布到 BitTorrent DHT，客户端无需手输地址即可发现。
+    // 默认关闭是刻意的：公布意味着地址公开可枚举，运营者应当自己决定。
+    //
+    // 公布用的端口 ≠ 监听端口是很常见的部署形态（Caddy 反代 443 -> 127.0.0.1:8080），
+    // 所以 --dht-announce 可以带一个显式端口：`--dht-announce 443`。
+    if let Some(dcfg) = dht::DhtConfig::from_args(
+        args,
+        std::path::Path::new(data_dir),
+        addr.port(),
+        turn_port_for_dht,
+    ) {
+        // 监听在回环地址时给个明确警告：公布出去的 IP 由 DHT 按来源判定，
+        // 本机回环出去的来源是公网出口 IP，但端口若只监听 127.0.0.1 则外部连不上。
+        if addr.ip().is_loopback() && opt(args, "--dht-announce").is_some() {
+            println!(
+                "[dht] 注意：中继只监听回环地址（{addr}）。请在前面用 Caddy/nginx 反代，\
+                 并把 --dht-announce 设成**对外实际端口**（例如 --dht-announce 443）"
+            );
+        }
+        println!(
+            "[dht] 已启用：将公布 WS 端口 {}{}，每 {}s 一次",
+            dcfg.ws_port,
+            dcfg.turn_port.map(|p| format!(" / TURN 端口 {p}")).unwrap_or_default(),
+            dcfg.interval.as_secs()
+        );
+        tokio::spawn(async move { dht::run(dcfg).await });
     }
 
     // TTL 清理

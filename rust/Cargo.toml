@@ -4,6 +4,7 @@ members = [
     "crates/proto",
     "crates/identity",
     "crates/secure",
+    "crates/dht",
     "crates/relay",
     "crates/punch",
     "crates/cli",

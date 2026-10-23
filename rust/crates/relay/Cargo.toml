@@ -7,6 +7,8 @@ description = "阶段 0 · 0.2 验证：无标识队列中继 + 长连接稳定�
 
 [dependencies]
 proto = { path = "../proto" }
+# DHT 自注册（BEP5），与客户端发现共用同一实现
+dht = { path = "../dht" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -19,6 +21,8 @@ md-5 = "0.10"
 sha1 = "0.10"
 hmac = "0.12"
 crc32fast = "1.5"
+# DHT 自注册：节点 ID / 事务 ID 需要系统熵源
+getrandom = "0.2"
 
 # 集成测试（tests/instant_recv.rs）用 client 走真实收发链路
 [dev-dependencies]

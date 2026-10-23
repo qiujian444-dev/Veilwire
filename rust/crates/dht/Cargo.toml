@@ -1,0 +1,13 @@
+[package]
+name = "dht"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mainline DHT（BEP5）轻客户端：中继自注册与客户端发现共用"
+
+[dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+serde_json.workspace = true
+sha1 = "0.10"
+getrandom = "0.2"

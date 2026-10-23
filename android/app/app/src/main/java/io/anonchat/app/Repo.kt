@@ -525,6 +525,19 @@ object Repo {
         return Res(d as? Long, e)
     }
 
+    /**
+     * 从 Mainline DHT 自动发现中继地址。
+     *
+     * 只返回候选，**不写任何本地配置**：调用方拿到后应当先测速，
+     * 再决定要不要采用（采用要走 [setRelay]）。
+     * 阻塞式调用，必须在 IO 线程。
+     */
+    fun discoverRelays(timeoutSecs: Long = 25): Res<List<String>> {
+        val (d, e) = envelope(Native.discoverRelays(dir, timeoutSecs))
+        if (d !is JSONArray) return Res(emptyList(), e)
+        return Res((0 until d.length()).mapNotNull { d.optString(it).takeIf { s -> s.isNotBlank() } }, e)
+    }
+
     fun selfQueue(): String? {
         val (d, _) = envelope(Native.selfQueue(dir))
         return d as? String

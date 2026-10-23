@@ -125,6 +125,11 @@
     <string name="relay_loading">Fetching the relay list…</string>
     <string name="relay_empty_title">List unavailable right now</string>
     <string name="relay_empty_hint">Could be the network, or the community list simply has no entries yet. If a friend set up a relay for you, enter the address below.</string>
+    <string name="relay_dht_discover">Discover relays automatically (DHT)</string>
+    <string name="relay_dht_discovering">Searching the DHT…</string>
+    <string name="relay_dht_hint">This takes up to half a minute on a fresh install. You can skip it and enter an address instead.</string>
+    <string name="relay_dht_none">Nothing found on the DHT. Try again later, or enter a relay address below.</string>
+    <string name="relay_dht_found">Found %1$d relay(s) on the DHT</string>
     <string name="relay_region_unknown">Region unknown</string>
     <string name="relay_probing">Probing…</string>
     <string name="relay_unreachable">Unreachable</string>

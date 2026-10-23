@@ -76,13 +76,25 @@ fn self_relays(me: &SelfState) -> Option<Vec<String>> {
     }
 }
 
-/// 合并"投递这条消息的中继"和"对方自报的中继"，去重保序，最多留 4 个。
+/// 合并"对方自报的中继"与"本地兜底中继"，去重保序，最多留 4 个。
 ///
-/// 投递中继排第一位：它一定可达（消息刚从我这儿出去），
-/// 对方自报的只是候选，可能已经下线。
-fn merge_relays(via: &str, extra: Option<Vec<String>>) -> Vec<String> {
+/// **顺序即语义**：`send_kind` 只用 `relays.first()`，所以第一位必须是
+/// *对方队列真正所在* 的中继，否则 `put` 会打到错误的中继上得到 `no_queue`。
+///
+/// 因此这里**只能**以对方自报的 `reply_relays` 为主；`fallback` 是本机当前中继，
+/// 它只在本机与对方恰好共用同一中继时才有意义，所以永远排最后。
+///
+/// 历史教训：早期版本写成 `merge_relays(via, extra)` 并让 `via` 排第一位，
+/// 那个推理是站在**发送方**立场（"消息刚从我这出去，所以这个中继可达"）。
+/// 但接收方语境下 `via` 是**自己的**中继，对方的队列根本不在那儿——
+/// 结果就是陌生人回信永远发不出去，而且双方界面上都看不出任何异常。
+fn merge_relays(peer: Option<Vec<String>>, fallback: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for r in std::iter::once(via.to_string()).chain(extra.unwrap_or_default()) {
+    for r in peer
+        .unwrap_or_default()
+        .into_iter()
+        .chain(std::iter::once(fallback.to_string()))
+    {
         let r = r.trim().to_string();
         if r.is_empty() || out.contains(&r) {
             continue;
@@ -395,6 +407,41 @@ pub fn restore(dir: &str, phrase: &str, name: Option<&str>) -> Result<String> {
     me.name = name.map(|s| s.to_string());
     save_self(&dir, &me)?;
     Ok(dev.id())
+}
+
+/// 从 Mainline DHT 自动发现中继地址（BEP5 `get_peers`）。
+///
+/// 返回形如 `ws://1.2.3.4:8443` 的候选列表，**不做可达性验证**——
+/// 调用方应当拿到之后自己探测（`relay_probe`）再决定用哪个。
+///
+/// 几个设计上的取舍：
+///
+/// - **只发现、不决定**。这里不碰本机已有配置，纯粹返回候选。
+///   是否采用、要不要切换中继，由上层决定（`set_relay` 才会动状态）。
+/// - **节点表缓存在设备目录**。DHT 的 bootstrap 域名在国内普遍被污染
+///   （实测 `router.utorrent.com` 会被解析到 Facebook 的 IP 段），
+///   所以首轮成功后要把节点表存下来，下次不再依赖域名。
+/// - **超时是硬约束**。这里给默认 25 秒：手机端冷启动可以接受，
+///   再长用户会以为卡死。查不到就返回空，**绝不阻塞主流程**。
+pub fn discover_relays(dir: &str, timeout_secs: u64) -> Result<Vec<String>> {
+    let dir = PathBuf::from(dir);
+    let cache = dir.join("dht-nodes.json");
+    let target = dht::service_key();
+    let dur = std::time::Duration::from_secs(timeout_secs.clamp(5, 90));
+    let peers = rt().block_on(async move { dht::discover(&cache, target, dur).await });
+
+    // 端口是对方公布的服务端口；path 固定 /ws（与部署文档一致）。
+    // 这里只给 ws://，wss:// 由上层根据是否配了 TLS 前缀再包一层。
+    let mut out: Vec<String> = peers
+        .into_iter()
+        .map(|(ip, port)| match ip {
+            std::net::IpAddr::V4(v4) => format!("ws://{v4}:{port}"),
+            std::net::IpAddr::V6(v6) => format!("ws://[{v6}]:{port}"),
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// 探测一个中继：完成 WebSocket 握手并计时，返回毫秒数。
@@ -821,6 +868,24 @@ pub fn purge_queue(dir: &str) -> Result<u64> {
 /// 先连上新中继并 sub 自己的队列做连通性验证，通过后才落盘；失败直接报错、不改任何文件。
 /// 注意：旧中继队列里未 ack 的消息**不会迁移**（中继之间没有互通协议），
 /// 调用方需要在 UI 上明确告知用户。
+/// 切换自己的中继：把**自己的收件队列**迁到新中继上。
+///
+/// 三条必须说清楚的语义（都是踩过的坑）：
+///
+/// 1. **只动自己的路由，不动联系人的**。
+///    联系人的 `relays` 表示"他的队列在哪个中继"，与我在哪台中继毫无关系。
+///    早期实现把所有联系人的 relays 全部改写成新地址，多中继场景下会让
+///    所有对外发送都打到错误的中继上（`no_queue`），且界面没有任何报错。
+///
+/// 2. **必须在新的中继上重建队列**。
+///    队列是中继实例本地的（不跨机器共享），旧 qid 在新中继上根本不存在；
+///    而 `Sub` 对未知队列是静默成功的，不重建就会"看起来在线、实际收不到"。
+///
+/// 3. **重建后要主动通知联系人**。
+///    对方记录的是我的旧 qid，不更新的话他们发的消息会堆在旧中继里没人取。
+///    这里给每个联系人发一条 `route` 控制帧，把新 qid 推过去。
+///
+/// 返回值：通知到的联系人数（不是"改了他们的中继"）。
 pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
     let dir = PathBuf::from(dir);
     let url = url.trim().to_string();
@@ -830,29 +895,75 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
     let lock = dev_lock(&dir);
     let _guard = lock.lock().expect("设备锁中毒");
     let mut me = load_self(&dir)?;
-    let qid = me
-        .qid
-        .clone()
-        .ok_or_else(|| anyhow!("还没有自己的队列，请先完成首次引导"))?;
 
-    // 连通性验证：连不上、sub 不上都算失败，一个字节都不改
-    rt().block_on(async {
+    // 已经是这个中继就没必要重建队列（重建会换 qid，等于让所有联系人重新学一遍）
+    if me.relays.first().map(|r| r == &url).unwrap_or(false) {
+        return Ok(0);
+    }
+
+    // 在新中继上建一个新队列：连通性验证 + 拿到新收件地址，一步完成。
+    // 先建后改，失败就一个字节都不动（保持旧中继可用）。
+    let new_qid = rt().block_on(async {
         let mut c = Conn::connect(&url).await?;
-        c.sub(&qid).await?;
-        Ok::<(), anyhow::Error>(())
+        let q = c.new_queue().await?;
+        c.sub(&q).await?;
+        Ok::<String, anyhow::Error>(q)
     })
     .map_err(|e| anyhow!("新中继不可用（{url}）: {e:#}"))?;
 
+    let old_qid = me.qid.clone();
+    me.qid = Some(new_qid.clone());
     me.relays = vec![url.clone()];
     save_self(&dir, &me)?;
 
-    let mut cs = load_contacts(&dir)?;
-    for c in cs.iter_mut() {
-        c.relays = vec![url.clone()];
+    // 联系人路由一律不动！只把"我换了收件地址"这件事加密推给他们。
+    //
+    // 这里不能调 send_control：设备锁不可重入，而本函数已经持有它。
+    // 所以就地用同一个 Device 加密；`route` 帧由接收端在 Rust 层直接消费
+    // （不上浮到 UI，也不落聊天记录）。
+    let mut dev = Device::load(&dir)?;
+    let cs = load_contacts(&dir)?;
+    let mut notified = 0usize;
+    for c in &cs {
+        let Some(relay) = c.relays.first() else { continue };
+        let body = serde_json::json!({ "qid": new_qid, "relays": [url] }).to_string();
+        let mid = proto::new_message_id();
+        let w = match dev.encrypt(
+            &c.dh,
+            &Payload {
+                v: PAYLOAD_VERSION,
+                id: mid,
+                from: dev.id(),
+                ts: proto::now_secs(),
+                text: String::new(),
+                reply_qid: me.qid.clone(),
+                reply_relays: self_relays(&me),
+                self_name: me.name.clone(),
+                kind: "route".to_string(),
+                body: Some(body),
+            },
+        ) {
+            Ok(w) => w,
+            // 某个联系人没有可用会话（比如刚被删过会话）：跳过，不阻断整体切换
+            Err(_) => continue,
+        };
+        let ok = rt()
+            .block_on(async {
+                let mut conn = Conn::connect(relay).await?;
+                conn.put(&c.qid, &w).await?;
+                Ok::<(), anyhow::Error>(())
+            })
+            .is_ok();
+        if ok {
+            notified += 1;
+        }
     }
-    let n = cs.len();
-    save_contacts(&dir, &cs)?;
-    Ok(n)
+    dev.save(&dir)?;
+
+    if let Some(o) = old_qid {
+        warn(format!("已切换到新中继 {url}，新队列 {new_qid}（旧队列 {o} 已弃用）"));
+    }
+    Ok(notified)
 }
 
 /// 删除联系人：联系人列表 + Olm 会话状态一起清。
@@ -961,6 +1072,44 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
             drop(_guard);
             match decrypted {
                 Ok((dh, p)) => {
+                    // 路由变更帧（对方换了中继/重建了队列）：在 Rust 层直接消费，
+                    // 不产生任何聊天记录，也不上浮到 UI。
+                    // 为什么必须在这里处理：否则对方换中继后我们会一直往他的旧队列发，
+                    // 消息堆在旧中继里没人取，而且发送方看不到任何失败。
+                    if p.kind == "route" {
+                        let mut updated = false;
+                        if let (Some(body), Ok(mut cs)) = (p.body.as_deref(), load_contacts(dir)) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                                let new_qid = v.get("qid").and_then(|x| x.as_str()).unwrap_or("");
+                                let new_relays: Vec<String> = v
+                                    .get("relays")
+                                    .and_then(|x| x.as_array())
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|s| s.as_str())
+                                            .filter(|s| !s.trim().is_empty())
+                                            .map(|s| s.trim().to_string())
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                if !new_qid.is_empty() && !new_relays.is_empty() {
+                                    if let Some(c) = cs.iter_mut().find(|c| c.dh == dh) {
+                                        c.qid = new_qid.to_string();
+                                        c.relays = new_relays;
+                                        updated = save_contacts(dir, &cs).is_ok();
+                                    }
+                                }
+                            }
+                        }
+                        ack_or_warn(&mut conn, &qid, &mid).await;
+                        if updated {
+                            warn(format!("对方 {dh} 更新了收件地址，路由已刷新"));
+                        }
+                        // 不递归（async fn 递归要装箱），直接当"这条不是聊天消息"返回；
+                        // 上层服务是循环调用，下一轮马上继续取。
+                        return Ok(None);
+                    }
+
                     let from_name = load_contacts(dir)
                         .ok()
                         .and_then(|cs| cs.into_iter().find(|c| c.dh == dh))
@@ -980,7 +1129,7 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
                         rid: p.id,
                         self_name: p.self_name,
                         reply_qid: p.reply_qid,
-                        reply_relays: merge_relays(&relay, p.reply_relays),
+                        reply_relays: merge_relays(p.reply_relays, &relay),
                     })
                 }
                 Err(e) => {

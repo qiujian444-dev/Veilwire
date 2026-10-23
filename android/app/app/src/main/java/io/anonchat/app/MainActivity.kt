@@ -544,6 +544,9 @@ private fun RelayStep(onDone: () -> Unit) {
     var custom by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(true) }
     var busyWith by remember { mutableStateOf<String?>(null) }
+    // DHT 自动发现：null = 还没点过；空集 = 点过但没找到
+    var discovering by remember { mutableStateOf(false) }
+    var dhtFound by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(Unit) {
         val (l, s) = withContext(Dispatchers.IO) { RelayList.load(ctx) }
@@ -577,6 +580,59 @@ private fun RelayStep(onDone: () -> Unit) {
 
         when {
             loading -> Text(stringResource(R.string.relay_loading))
+            else -> {
+                // DHT 自动发现：一条都不用手输。找到的地址会并进下面的列表一起测速。
+                Button(
+                    enabled = busyWith == null && !discovering,
+                    onClick = {
+                        discovering = true
+                        kotlinx.coroutines.MainScope().launch {
+                            val r = withContext(Dispatchers.IO) { Repo.discoverRelays() }
+                            val got = r.data.orEmpty()
+                            if (got.isNotEmpty()) {
+                                val known = list.map { it.url }.toSet()
+                                val added = got.filter { it !in known }
+                                    .map { RelayEntry(it, "", "") }
+                                list = list + added
+                                // 只测新来的，避免把已有结果覆盖掉
+                                val m = RelayList.probeAll(added.map { it.url })
+                                latency = latency + m
+                            }
+                            dhtFound = got.size
+                            discovering = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        when {
+                            discovering -> stringResource(R.string.relay_dht_discovering)
+                            else -> stringResource(R.string.relay_dht_discover)
+                        }
+                    )
+                }
+                when {
+                    discovering -> Text(
+                        stringResource(R.string.relay_dht_hint),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    dhtFound == 0 -> Text(
+                        stringResource(R.string.relay_dht_none),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    dhtFound != null && dhtFound!! > 0 -> Text(
+                        stringResource(R.string.relay_dht_found, dhtFound!!),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+
+        when {
+            loading -> {}
             list.isEmpty() -> Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(stringResource(R.string.relay_empty_title), fontWeight = FontWeight.Medium)
