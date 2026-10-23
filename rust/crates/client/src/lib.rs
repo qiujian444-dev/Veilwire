@@ -428,9 +428,27 @@ pub fn discover_relays(dir: &str, timeout_secs: u64) -> Result<Vec<String>> {
     let cache = dir.join("dht-nodes.json");
     let target = dht::service_key();
     let dur = std::time::Duration::from_secs(timeout_secs.clamp(5, 90));
-    let peers = rt().block_on(async move { dht::discover(&cache, target, dur).await });
+    let d = rt().block_on(async move { dht::discover(&cache, target, dur).await });
 
-    // 端口是对方公布的服务端口；path 固定 /ws（与部署文档一致）。
+    // 一行日志交代清楚卡在哪：种子=0 是 DNS/网络，节点=0 是 UDP 出不去，
+    // 都大于 0 但没有 peer 是时间不够或记录不在附近。
+    // Rust 的 stderr 在 Android 上会被丢弃，所以走 warn() → 告警队列 → logcat。
+    warn(format!(
+        "DHT 发现：种子 {} 个，爬到 {} 个节点，命中 {} 个中继（预算 {}s）",
+        d.seeds,
+        d.nodes,
+        d.peers.len(),
+        dur.as_secs()
+    ));
+    if d.seeds == 0 {
+        return Err(anyhow!("解析不到任何 DHT 引导节点（DNS 或网络不可用）"));
+    }
+    if d.nodes == 0 {
+        return Err(anyhow!("DHT 节点全部无响应（UDP 出站可能被封）"));
+    }
+    let peers = d.peers;
+
+    // 端口是对方公布的服务端口；relay 的 accept 不校验 path，连根路径即可。
     // 这里只给 ws://，wss:// 由上层根据是否配了 TLS 前缀再包一层。
     let mut out: Vec<String> = peers
         .into_iter()
@@ -633,9 +651,16 @@ pub fn turn_creds(dir: &str) -> Option<TurnCreds> {
 pub fn relay_probe(url: &str) -> Result<u64> {
     let start = std::time::Instant::now();
     rt().block_on(async {
-        let (ws, _) = tokio_tungstenite::connect_async(url)
-            .await
-            .with_context(|| format!("连不上中继 {url}"))?;
+        // 必须有硬超时。`connect_async` 自己不带超时：探测一个不可达的地址
+        // （防火墙丢 SYN）会一直挂着，直到操作系统放弃——安卓上约两分钟。
+        // 表现是"自动发现"里三条结果一直显示 Probing…，界面像卡死。
+        let (ws, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio_tungstenite::connect_async(url),
+        )
+        .await
+        .map_err(|_| anyhow!("探测 {url} 超时（5 秒）"))?
+        .with_context(|| format!("连不上中继 {url}"))?;
         // 连接留一句关闭握手就走，别占着中继的连接槽
         let mut ws = ws;
         let _ = ws.close(None).await;
@@ -1066,6 +1091,25 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
 
     // 已经是这个中继就没必要重建队列（重建会换 qid，等于让所有联系人重新学一遍）
     if me.relays.first().map(|r| r == &url).unwrap_or(false) {
+        return Ok(0);
+    }
+
+    // 还没有自己的队列（新装、从没生成过邀请码）：那就把"切中继"理解成
+    // "在这台上建我的队列"。早先这里直接报错"请先完成首次引导"——
+    // 而设置页的中继入口对新用户恰好是唯一能走的路，于是彻底死锁：
+    // 不选中继就没队列，没队列就不能选中继。
+    if me.qid.is_none() {
+        let q = rt().block_on(async {
+            let mut c = Conn::connect(&url).await?;
+            let q = c.new_queue().await?;
+            c.sub(&q).await?;
+            Ok::<String, anyhow::Error>(q)
+        })
+        .map_err(|e| anyhow!("新中继不可用（{url}）: {e:#}"))?;
+        me.qid = Some(q.clone());
+        me.relays = vec![url.clone()];
+        save_self(&dir, &me)?;
+        warn(format!("已在 {url} 建立队列 {q}"));
         return Ok(0);
     }
 

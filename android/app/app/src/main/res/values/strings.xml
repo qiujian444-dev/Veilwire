@@ -127,7 +127,7 @@
     <string name="relay_empty_hint">Could be the network, or the community list simply has no entries yet. If a friend set up a relay for you, enter the address below.</string>
     <string name="relay_dht_discover">Discover relays automatically (DHT)</string>
     <string name="relay_dht_discovering">Searching the DHT…</string>
-    <string name="relay_dht_hint">This takes up to half a minute on a fresh install. You can skip it and enter an address instead.</string>
+    <string name="relay_dht_hint">This can take up to a minute on a fresh install. You can skip it and enter an address instead.</string>
     <string name="relay_dht_none">Nothing found on the DHT. Try again later, or enter a relay address below.</string>
     <string name="relay_dht_found">Found %1$d relay(s) on the DHT</string>
     <string name="relay_region_unknown">Region unknown</string>
@@ -166,7 +166,7 @@
     <string name="settings_save">Save settings</string>
     <string name="settings_switch_relay_title">Switch relay?</string>
     <string name="settings_switch_new_addr">New address: %1$s</string>
-    <string name="settings_switch_body">Your inbox queue and every contact\'s relay will move to the new address.\n\nNote: messages not yet delivered on the old relay **will not** migrate — the other side has to send them again.\n\nThe other side also needs to be able to reach this relay, or nothing can be sent between you.</string>
+    <string name="settings_switch_body">Your inbox queue and every contact\'s relay will move to the new address.\n\nNote: messages not yet delivered on the old relay WILL NOT migrate — the other side has to send them again.\n\nThe other side also needs to be able to reach this relay, or nothing can be sent between you.</string>
     <string name="settings_switch_verifying">Verifying the new relay…</string>
     <string name="settings_switch_done">Relay switched</string>
     <string name="settings_switch_failed">Switch failed: %1$s</string>

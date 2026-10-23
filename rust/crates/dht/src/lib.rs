@@ -384,31 +384,70 @@ pub fn turn_key() -> [u8; 20] {
 // ------------------------------------------------------------------ 爬取与公布
 
 /// 从种子 + 缓存出发，迭代爬到离 target 最近的一批节点。
+/// 朝 target 方向迭代 `find_node`，返回响应过的节点（按距离排序）。
+///
+/// **必须并发**。早先是单线程串行：每个查询 3 秒超时，45 秒预算只够问十几个节点，
+/// 在丢包严重的网络里等于没爬（实测安卓模拟器上 45 秒只拿到 6 个节点——刚好是种子本身，
+/// 一个邻居都没进来，于是"发现"永远返回空）。
+///
+/// 每个并发查询**自带 socket**：`query()` 是"发出去然后在这个 socket 上等自己的
+/// 事务号"，多个查询挤一个 socket 会互相把对方的响应丢掉。
+///
+/// `krpc` 参数保留只为兼容既有调用方（中继的定时公布也走这里），不参与查询。
 pub async fn crawl(krpc: &Krpc, seeds: &[Node], target: &[u8; 20], dur: Duration) -> Vec<Node> {
     use std::collections::HashSet;
-    let mut seen: HashSet<(IpAddr, u16)> = HashSet::new();
+    let _ = krpc;
+    const WIDTH: usize = 16;
+
+    let mut queued: HashSet<(IpAddr, u16)> = HashSet::new();
+    let mut queried: HashSet<(IpAddr, u16)> = HashSet::new();
     let mut found: BTreeMap<(IpAddr, u16), Node> = BTreeMap::new();
-    let mut queue: Vec<Node> = seeds.to_vec();
-    for s in &queue {
-        seen.insert(s.addr);
+    let mut cand: Vec<Node> = Vec::new();
+    for s in seeds {
+        if queued.insert(s.addr) {
+            cand.push(s.clone());
+        }
     }
     let deadline = tokio::time::Instant::now() + dur;
     let my_id = random_id();
 
     while tokio::time::Instant::now() < deadline {
-        let Some(node) = queue.pop() else { break };
-        match krpc.find_node(node.addr, target, &my_id).await {
-            Ok(nodes) => {
-                found.insert(node.addr, node.clone());
-                for n in nodes {
-                    if seen.insert(n.addr) {
-                        queue.push(n);
-                    }
+        cand.sort_by_key(|n| n.dist(target));
+        let batch: Vec<Node> = cand
+            .iter()
+            .filter(|n| !queried.contains(&n.addr))
+            .take(WIDTH)
+            .cloned()
+            .collect();
+        if batch.is_empty() {
+            break;
+        }
+        for n in &batch {
+            queried.insert(n.addr);
+        }
+
+        let mut set = tokio::task::JoinSet::new();
+        for n in batch {
+            let t = *target;
+            let id = my_id;
+            set.spawn(async move {
+                let k = Krpc::new().await.ok()?;
+                let r = k.find_node(n.addr, &t, &id).await;
+                Some((n, r))
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            let Ok(Some((node, r))) = joined else { continue };
+            let Ok(nodes) = r else { continue };
+            found.insert(node.addr, node);
+            for n in nodes {
+                if queued.insert(n.addr) {
+                    cand.push(n);
                 }
             }
-            Err(_) => {}
         }
     }
+
     let mut v: Vec<Node> = found.into_values().collect();
     v.sort_by_key(|n| n.dist(target));
     v
@@ -633,22 +672,60 @@ fn parse_peer_values(v: Option<&Val>) -> Vec<Peer> {
 /// 客户端一站式发现：读缓存 → 不够就补种子 → 爬取 + get_peers → 写回缓存。
 ///
 /// `cache` 是节点表缓存路径（建议放在设备目录下），下次可以跳过域名解析。
-pub async fn discover(cache: &Path, target: [u8; 20], dur: Duration) -> Vec<Peer> {
+/// 一次发现的过程数据。
+///
+/// **为什么要连过程一起返回**：Rust 的 stderr 在 Android 上被系统丢弃，
+/// 光返回"没找到"根本没法区分是 DNS 挂了、UDP 出不去、还是时间不够。
+/// 有了这三个数字，看一行日志就知道卡在哪一步。
+pub struct Discovery {
+    pub peers: Vec<Peer>,
+    /// 参与播种的节点数（缓存 + 解析成功的 bootstrap 域名）
+    pub seeds: usize,
+    /// 成功响应过的节点数
+    pub nodes: usize,
+}
+
+pub async fn discover(cache: &Path, target: [u8; 20], dur: Duration) -> Discovery {
     let mut seeds = load_nodes(cache);
-    if seeds.len() < 8 {
-        let resolved = resolve_seeds(&default_seeds()).await;
+
+    // 内置 IP 快照**无条件**参与，不看缓存多少。
+    //
+    // 因为缓存里完全可能是那批投毒节点：它们能正常响应 ping/find_node，
+    // 只是节点表永远是空的——于是"用了缓存"反而把自己钉死在原地，
+    // 12 个内置 IP 里只要有一个活着，爬取就能重新展开。
+    {
         let mut seen: std::collections::HashSet<_> = seeds.iter().map(|n| n.addr).collect();
-        for n in resolved {
-            if seen.insert(n.addr) {
-                seeds.push(n);
+        for (ip, port) in STATIC_SEEDS {
+            let Ok(ip) = ip.parse::<IpAddr>() else { continue };
+            let addr = (ip, *port);
+            if seen.insert(addr) {
+                seeds.push(Node {
+                    id: random_id(), // 真实 id 由响应补上
+                    addr,
+                });
             }
         }
     }
+
+    // 域名只在连一个可用地址都没有时才去解析（正常永远走不到这里），
+    // 因为这套网络里它们基本都被污染了，解析反而浪费时间。
     if seeds.is_empty() {
-        return Vec::new();
+        seeds = resolve_seeds(&default_seeds()).await;
     }
+    if seeds.is_empty() {
+        return Discovery {
+            peers: Vec::new(),
+            seeds: 0,
+            nodes: 0,
+        };
+    }
+    let seed_count = seeds.len();
     let Ok(krpc) = Krpc::new().await else {
-        return Vec::new();
+        return Discovery {
+            peers: Vec::new(),
+            seeds: seed_count,
+            nodes: 0,
+        };
     };
     let (peers, nodes) = lookup(&krpc, &seeds, &target, dur).await;
 
@@ -658,17 +735,61 @@ pub async fn discover(cache: &Path, target: [u8; 20], dur: Duration) -> Vec<Peer
         save_nodes(cache, &nodes);
     }
 
-    peers
+    Discovery {
+        peers,
+        seeds: seed_count,
+        nodes: nodes.len(),
+    }
 }
 
-/// 默认 bootstrap 种子（域名可能被污染，只作为"缓存为空"时的兜底）。
+/// 内置 bootstrap 快照：**IP 直连，不过 DNS**。
+///
+/// 为什么必须有这一份：这套网络的 DNS 解析 bootstrap 域名会给出投毒地址。
+/// 实测（2026-10）：
+///   - `router.bittorrent.com` → 108.160.162.31 / 108.160.167.30（Dropbox 的段）
+///   - `dht.transmissionbt.com` → 212.129.33.59（那个只会回 8 条完全相同记录的节点）
+///
+/// 投毒节点**会正常响应**，只是节点表是空的。于是"爬邻居"永远原地踏步：
+/// 45 秒预算只拿到 6 个节点——刚好是种子自己，一个邻居都没进来，
+/// 表现就是"自动发现永远找不到中继"，而且没有任何报错。
+///
+/// 域名仍保留在列表里（万一哪天通了），但这批 IP 排在最前面：
+/// 只要有一个能用，就完全不依赖 DNS。
+///
+/// ⚠️ 这份快照会腐烂（里面的家用节点随时下线，端口也在变）。
+/// 它的定位是"首次安装时的最后一根拐杖"：一旦成功爬到节点，
+/// 节点表就写进缓存（`dht-nodes.json`），之后冷启动都用缓存，不再需要它。
+/// 挑选标准：当时实测 `find_node` 有响应且返回 >= 8 个真实邻居（非注入）。
+pub const STATIC_SEEDS: &[(&str, u16)] = &[
+    // 公共 bootstrap（libtorrent），端口 25401 是它的标准端口
+    ("185.157.221.247", 25401),
+    ("185.212.237.153", 59504),
+    ("194.44.26.64", 3948),
+    ("217.65.122.153", 5481),
+    ("195.28.149.178", 5113),
+    // 下面这些是普通客户端节点，用来提高"至少有一个活"的概率，不要指望长期稳定
+    ("223.166.34.36", 55555),
+    ("123.109.83.123", 35255),
+    ("5.77.204.166", 14765),
+    ("218.86.186.26", 51413),
+    ("84.236.75.218", 51413),
+    ("84.86.183.76", 31687),
+    ("109.173.237.124", 51413),
+];
+
+/// 默认 bootstrap 种子：内置 IP 快照在前，域名在后。
 pub fn default_seeds() -> Vec<(String, u16)> {
-    vec![
-        ("router.bittorrent.com".into(), 6881),
-        ("dht.transmissionbt.com".into(), 6881),
-        ("router.utorrent.com".into(), 6881),
-        ("dht.libtorrent.org".into(), 25401),
-    ]
+    let mut out: Vec<(String, u16)> = STATIC_SEEDS
+        .iter()
+        .map(|(ip, port)| ((*ip).to_string(), *port))
+        .collect();
+    out.extend([
+        ("router.bittorrent.com".to_string(), 6881),
+        ("dht.transmissionbt.com".to_string(), 6881),
+        ("router.utorrent.com".to_string(), 6881),
+        ("dht.libtorrent.org".to_string(), 25401),
+    ]);
+    out
 }
 
 // ------------------------------------------------------------------ 主循环
@@ -677,7 +798,18 @@ pub fn default_seeds() -> Vec<(String, u16)> {
 async fn resolve_seeds(seeds: &[(String, u16)]) -> Vec<Node> {
     let mut out = Vec::new();
     for (host, port) in seeds {
-        if let Ok(mut it) = tokio::net::lookup_host((host.as_str(), *port)).await {
+        // 每个域名最多等 3 秒：被污染/黑洞的 DNS 会让 lookup_host 挂很久，
+        // 而这里是最开局的一步，拖掉的时间直接等于"发现失败"。
+        // IP 字符串不会真的走 DNS，立刻返回。
+        let Ok(res) = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::lookup_host((host.as_str(), *port)),
+        )
+        .await
+        else {
+            continue;
+        };
+        if let Ok(mut it) = res {
             if let Some(sa) = it.next() {
                 out.push(Node {
                     id: random_id(), // 真实 id 由 find_node 响应补上，这里先占位

@@ -127,7 +127,7 @@
     <string name="relay_empty_hint">可能是网络原因，也可能社区还没有收录节点。如果朋友给你搭了中继，直接在下面输入地址即可。</string>
     <string name="relay_dht_discover">自动发现中继（DHT）</string>
     <string name="relay_dht_discovering">正在搜索 DHT…</string>
-    <string name="relay_dht_hint">首次运行可能需要半分钟左右。不想等也可以直接填地址。</string>
+    <string name="relay_dht_hint">首次运行可能需要一分钟左右。不想等也可以直接填地址。</string>
     <string name="relay_dht_none">DHT 上没有找到可用中继。稍后再试，或在下面手动填写地址。</string>
     <string name="relay_dht_found">从 DHT 发现 %1$d 个中继</string>
     <string name="relay_region_unknown">地区未知</string>
@@ -166,7 +166,7 @@
     <string name="settings_save">保存设置</string>
     <string name="settings_switch_relay_title">切换中继？</string>
     <string name="settings_switch_new_addr">新地址：%1$s</string>
-    <string name="settings_switch_body">切换后，你的收件队列和所有联系人的中继都会改到新地址。\n\n注意：旧中继上还没送达的消息**不会**迁移过来——对方重新发一次才收得到。\n\n对方也需要能连到这个中继，否则你们之间发不出消息。</string>
+    <string name="settings_switch_body">切换后，你的收件队列和所有联系人的中继都会改到新地址。\n\n注意：旧中继上还没送达的消息不会迁移过来——对方重新发一次才收得到。\n\n对方也需要能连到这个中继，否则你们之间发不出消息。</string>
     <string name="settings_switch_verifying">正在验证新中继…</string>
     <string name="settings_switch_done">已切换中继</string>
     <string name="settings_switch_failed">切换失败：%1$s</string>

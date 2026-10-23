@@ -541,7 +541,11 @@ object Repo {
     /** 中继探测：WS 握手耗时（毫秒）。失败返回 error */
     fun relayProbe(url: String): Res<Long> {
         val (d, e) = envelope(Native.relayProbe(url))
-        return Res(d as? Long, e)
+        // 必须是 `as? Number` 再 toLong()：org.json 把能放进 Int 的数
+        // （比如 45ms）解析成 Integer，`as? Long` 会得到 null ——
+        // 于是**每一次**探测都变成"不可达"，中继列表里永远全是 Unreachable。
+        // 这个 bug 之前一直藏着，因为列表原本是空的，没人看见过探测结果。
+        return Res((d as? Number)?.toLong(), e)
     }
 
     /**
@@ -572,7 +576,7 @@ object Repo {
         )
     }
 
-    fun discoverRelays(timeoutSecs: Long = 25): Res<List<String>> {
+    fun discoverRelays(timeoutSecs: Long = 45): Res<List<String>> {
         val (d, e) = envelope(Native.discoverRelays(dir, timeoutSecs))
         if (d !is JSONArray) return Res(emptyList(), e)
         return Res((0 until d.length()).mapNotNull { d.optString(it).takeIf { s -> s.isNotBlank() } }, e)

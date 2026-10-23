@@ -191,13 +191,15 @@ class MessagingService : Service() {
                 // 技术信息走 error 通道（语言中性），这条只在后台异常时进日志
                 Res<Incoming?>(null, "receive failed: ${t.message}")
             }
+            // 无论这轮成功与否都要把 Rust 侧攒下的告警取出来。
+            // 原来只在成功分支里取，于是"一直连不上中继"这种持续失败状态下
+            // 告警全堆在队列里（上限 32 条后被挤掉），logcat 里一条都看不到。
+            Repo.drainWarnings().forEach { Log.w(TAG, "core warning: $it") }
             if (res.ok) {
                 backoff = 2_000L
                 // 处理段也必须兜住：通知/信令/状态发布的任何异常如果逃出这里，
                 // 协程直接结束，服务还"活着"但再也不收消息（永久静默）。
                 try {
-                    // Rust 侧的解密失败等告警：不打出来就永远查不到
-                    Repo.drainWarnings().forEach { Log.w(TAG, "core warning: $it") }
 
                     // 阅后即焚到期清扫：收消息循环每轮一次（空闲时每 RECV_TIMEOUT_SECS
                     // 一轮），配合聊天页的每秒 tick 和启动清扫，三层兜底

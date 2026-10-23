@@ -72,6 +72,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -1728,6 +1729,10 @@ private fun RelayPickerDialog(
     var list by remember { mutableStateOf<List<RelayEntry>>(emptyList()) }
     var latency by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var custom by remember { mutableStateOf("") }
+    // 与首次引导页同一套逻辑；这里单独放一份因为弹窗的布局不同
+    var discovering by remember { mutableStateOf(false) }
+    var dhtFound by remember { mutableStateOf<Int?>(null) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         val (l, _) = withContext(Dispatchers.IO) { RelayList.load(ctx) }
@@ -1746,6 +1751,54 @@ private fun RelayPickerDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(8.dp))
+
+                // 只放在首次引导页是不够的：已经装过 App 的人只会进这个弹窗，
+                // 永远看不到那个按钮。两处都要有。
+                OutlinedButton(
+                    enabled = !discovering,
+                    onClick = {
+                        discovering = true
+                        scope.launch {
+                            val r = withContext(Dispatchers.IO) { Repo.discoverRelays() }
+                            val got = r.data.orEmpty()
+                            if (got.isNotEmpty()) {
+                                val known = list.map { it.url }.toSet()
+                                val added = got.filter { it !in known }
+                                    .map { RelayEntry(it, "", "") }
+                                list = list + added
+                                // 只测新来的，别覆盖已有结果
+                                latency = latency + RelayList.probeAll(added.map { it.url })
+                            }
+                            dhtFound = got.size
+                            discovering = false
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (discovering) stringResource(R.string.relay_dht_discovering)
+                        else stringResource(R.string.relay_dht_discover)
+                    )
+                }
+                when {
+                    discovering -> Text(
+                        stringResource(R.string.relay_dht_hint),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    dhtFound == 0 -> Text(
+                        stringResource(R.string.relay_dht_none),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    dhtFound != null && dhtFound!! > 0 -> Text(
+                        stringResource(R.string.relay_dht_found, dhtFound!!),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+
                 if (list.isEmpty()) {
                     Text(stringResource(R.string.relay_pick_empty), style = MaterialTheme.typography.bodySmall)
                 } else {
