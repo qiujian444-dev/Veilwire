@@ -167,6 +167,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dht",
  "futures-util",
  "identity",
  "proto",
@@ -264,6 +265,17 @@ checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
  "zeroize",
+]
+
+[[package]]
+name = "dht"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "getrandom",
+ "serde_json",
+ "sha1",
+ "tokio",
 ]
 
 [[package]]
@@ -718,7 +730,9 @@ dependencies = [
  "base64",
  "client",
  "crc32fast",
+ "dht",
  "futures-util",
+ "getrandom",
  "hmac",
  "md-5",
  "proto",

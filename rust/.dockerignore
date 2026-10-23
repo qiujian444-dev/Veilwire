@@ -1,0 +1,4 @@
+# 构建上下文只需源码；target/ 里是上次编译产物（可能上 GB），不要传给 docker
+target/
+**/target/
+*.log
