@@ -12,8 +12,8 @@ android {
         applicationId = "io.anonchat.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 32
-        versionName = "0.15.5"
+        versionCode = 33
+        versionName = "0.15.6"
         // ABI 由下面的 splits 控制，这里不能再写 abiFilters——
         // 两者同时设置 AGP 会直接报冲突。
     }

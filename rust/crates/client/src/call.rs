@@ -376,13 +376,29 @@ impl Call {
     ///
     /// 忙线时不抢占，而是让上层回一条 reject —— 抢断会让正在通话的双方都被踢掉。
     pub fn on_offer(&mut self, from_dh: &str, body: &OfferBody, msg_id: &str, now: u64) -> Vec<Action> {
+        self.on_offer_ex(from_dh, body, msg_id, now).0
+    }
+
+    /// [on_offer] 的完整版：附带"这份 offer 是否被状态机接受"。
+    ///
+    /// 调用方（`call_inbound`）只允许把**被接受**的 offer 的 SDP 透出给 UI：
+    /// 被忙线拒接的第三方 offer、被代际守卫丢弃的迟到重协商，其 SDP 一旦
+    /// 透出，UI 按契约执行 setRemoteDescription 就会污染正在进行的通话
+    /// （这正是状态机防了半天、却在 API 层漏掉的那一刀）。
+    pub fn on_offer_ex(
+        &mut self,
+        from_dh: &str,
+        body: &OfferBody,
+        msg_id: &str,
+        now: u64,
+    ) -> (Vec<Action>, bool) {
         if !Self::check_id(&body.call_id) || body.sdp.len() > MAX_SDP_LEN {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
         // 同一通话重复到达：只认第一次，避免 UI 反复弹窗
         if !self.mark_seen(msg_id) {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
         // 通话中的重协商（对端换了网络）：状态保持 Active，只是要重建媒体通道。
@@ -390,12 +406,12 @@ impl Call {
         if body.restart {
             if body.call_id != self.call_id || self.state != State::Active {
                 // 旧通话的重协商、或还没接通就要重协商：都不合理，忽略
-                return Vec::new();
+                return (Vec::new(), false);
             }
 
             // 旧代际（重放 / 迟到）直接丢：否则会把已经重建好的媒体通道退回上一条网络路径
             if body.gen != 0 && body.gen <= self.peer_gen {
-                return Vec::new();
+                return (Vec::new(), false);
             }
 
             // 双方同时换网络会各自发重协商（glare）。规则：
@@ -409,7 +425,7 @@ impl Call {
                 } else if body.gen == self.gen && self.awaiting.is_some() {
                     if self.caller {
                         // 我是主叫：我的 offer 优先，忽略对方的
-                        return Vec::new();
+                        return (Vec::new(), false);
                     }
                     self.awaiting = None;
                 }
@@ -417,13 +433,13 @@ impl Call {
             }
 
             self.renegotiating = true;
-            return vec![self.state_action()];
+            return (vec![self.state_action()], true);
         }
 
         // 同一通电话的重发 offer：状态不变，但要把 answer 补发一次
         // （对方可能没收到我先前的 answer）
         if self.call_id == body.call_id && matches!(self.state, State::Incoming | State::Active) {
-            return vec![self.state_action()];
+            return (vec![self.state_action()], true);
         }
 
         if self.state.is_busy() {
@@ -431,11 +447,16 @@ impl Call {
                 call_id: body.call_id.clone(),
                 reason: "busy".to_string(),
             };
-            return vec![Action::Send {
-                to_dh: from_dh.to_string(),
-                kind: crate::call_kind::REJECT.to_string(),
-                body: serde_json::to_string(&end).unwrap_or_default(),
-            }];
+            // 忙线拒接是合法动作（对方需要知道），但 SDP 绝不能透出：
+            // 那是第三方的 offer，UI 应用它会毁掉正在进行的通话。
+            return (
+                vec![Action::Send {
+                    to_dh: from_dh.to_string(),
+                    kind: crate::call_kind::REJECT.to_string(),
+                    body: serde_json::to_string(&end).unwrap_or_default(),
+                }],
+                false,
+            );
         }
 
         self.call_id = body.call_id.clone();
@@ -448,7 +469,7 @@ impl Call {
         self.peer_gen = 0;
         self.caller = false;
         self.enter(State::Incoming, now);
-        vec![self.state_action()]
+        (vec![self.state_action()], true)
     }
 
     /// 用户点了接听。返回 answer 动作；`sdp` 由上层在设置远端描述后生成。
@@ -858,18 +879,47 @@ mod tests {
         assert_eq!(b.state(), State::Active);
 
         // 另一个人打进来
-        let acts = b.on_offer("dh_carol", &offer("c2"), "m2", 110);
+        let acts = b.on_offer(A, &offer("c2"), "m2", 110);
         assert_eq!(b.state(), State::Active, "当前通话不能被打断");
         assert_eq!(b.call_id(), "c1", "call_id 不能被覆盖");
         let rej = find_send(&acts, crate::call_kind::REJECT).expect("应回 reject");
         match rej {
             Action::Send { to_dh, body, .. } => {
-                assert_eq!(to_dh, "dh_carol");
+                assert_eq!(to_dh, A);
                 assert!(body.contains("\"c2\""), "reject 要针对新来电: {body}");
                 assert!(body.contains("busy"));
             }
             _ => unreachable!(),
         }
+    }
+
+    /// 忙线时第三方的 offer：`on_offer_ex` 必须报告**未接受**——
+    /// `call_inbound` 据此不把这份 SDP 透出 UI。否则 UI 按契约
+    /// setRemoteDescription 会把正在进行的通话媒体描述整个换掉。
+    #[test]
+    fn busy_offer_is_not_accepted_for_ui() {
+        let mut b = Call::new();
+        b.on_offer(A, &offer("c1"), "m1", 100);
+        b.accept("v=0 ans", 101);
+
+        let (_, accepted) = b.on_offer_ex("dh_carol", &offer("c2"), "m2", 110);
+        assert!(!accepted, "忙线拒接的 offer 不能透出给 UI");
+
+        // 对照：正常来电必须报告接受（否则 UI 拿不到 SDP 建不了媒体）
+        let mut idle = Call::new();
+        let (_, accepted2) = idle.on_offer_ex(A, &offer("c9"), "m9", 200);
+        assert!(accepted2);
+    }
+
+    /// 中继重投同一条 offer（同 msg_id）：去重后必须报告未接受，
+    /// 否则 UI 会反复 prepareIncoming（重响铃/重建 PeerConnection）。
+    #[test]
+    fn duplicate_offer_is_not_accepted_for_ui() {
+        let mut b = Call::new();
+        let (_, first) = b.on_offer_ex(A, &offer("c1"), "same-msg", 100);
+        assert!(first);
+        let (_, dup) = b.on_offer_ex(A, &offer("c1"), "same-msg", 101);
+        assert!(!dup, "重投的 offer 不该再次透出 SDP");
     }
 
     /// 上一通电话迟到的 end 不能把当前通话挂掉 —— 弱网重投下真实会发生

@@ -151,10 +151,13 @@ fn dec(b: &[u8], mut i: usize) -> Result<(Val, usize)> {
                 + i;
             let len: usize = std::str::from_utf8(&b[i..colon])?.parse()?;
             let start = colon + 1;
-            let end = start + len;
-            if end > b.len() {
+            // len 是网络上来的：攻击者填 usize::MAX 时 `start + len` 会回绕成
+            // 小值，绕过下面的越界检查，然后 b[start..end] 起止倒置直接 panic。
+            // 必须在加法之前比长度（任意 DHT 节点都能发这种包）。
+            if len > b.len().saturating_sub(start) {
                 return Err(anyhow!("字符串越界"));
             }
+            let end = start + len;
             Ok((Val::Bytes(b[start..end].to_vec()), end))
         }
         _ => Err(anyhow!("无法识别的 bencode 类型 {c}")),
@@ -896,6 +899,16 @@ fn sha1(data: &[u8]) -> [u8; 20] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 恶意长度字段（usize::MAX）：加法回绕会让起止倒置的 slice panic。
+    /// 任何一个 DHT 节点都能发这种包，必须报错而不是打崩解析任务。
+    #[test]
+    fn bdecode_rejects_huge_string_length() {
+        let evil = b"18446744073709551615:x";
+        assert!(bdecode(evil).is_err());
+        // 接近上限但仍在包内的合法长度照常工作
+        assert_eq!(bdecode(b"3:abc").unwrap(), Val::Bytes(b"abc".to_vec()));
+    }
 
     #[test]
     fn bencode_roundtrip() {

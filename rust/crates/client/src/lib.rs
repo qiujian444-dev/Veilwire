@@ -945,6 +945,11 @@ pub fn send_batch(dir: &str, to: &str, kind: &str, bodies: &[String]) -> Result<
         )?;
         wires.push(w);
     }
+    // 棘轮已在加密时推进，必须在任何密文离开本机之前落盘：
+    // put_first 中途失败时前 k 块已进对端队列，若此刻磁盘还是旧棘轮，
+    // 下次发送（哪怕只是普通文本）会用已被对端消费过的密钥加密新内容——
+    // 对端要么判成重复静默吞掉（消息凭空消失），要么 MAC 失败无限重投。
+    dev.save(&dir)?;
 
     if c.relays.is_empty() {
         return Err(anyhow!("联系人没有可用的中继地址"));
@@ -952,6 +957,8 @@ pub fn send_batch(dir: &str, to: &str, kind: &str, bodies: &[String]) -> Result<
     let used = rt().block_on(put_first(&c.relays, &c.qid, &wires))?;
     promote_contact_relay(&dir, &c.dh, &used);
 
+    // 投递成功后的这次 save 是幂等冗余（棘轮在投递前已存），留着兜底
+    // 将来有人在中间插入设备状态修改。
     dev.save(&dir)?;
     Ok(ids)
 }
@@ -1658,9 +1665,16 @@ pub fn call_inbound(
         call_kind::OFFER => {
             let b: call::OfferBody = serde_json::from_str(body)
                 .map_err(|e| anyhow!("offer 格式不对：{e}"))?;
-            extra.remote_sdp = Some(b.sdp.clone());
-            extra.video = b.video;
-            with_call(dir, |s| s.on_offer(from_dh, &b, msg_id, t))
+            // 只有被状态机接受的 offer 才把 SDP 透出给 UI（仿 ICE 分支的写法）。
+            // 之前无条件透出：被忙线拒接的第三方 offer、被代际守卫丢弃的迟到
+            // 重协商，其 SDP 照样挂在 CallEvent 上——UI 按契约 setRemoteDescription
+            // 会污染正在进行的通话（状态机防了、API 层漏了的那一刀）。
+            let (acts, accepted) = with_call(dir, |s| s.on_offer_ex(from_dh, &b, msg_id, t));
+            if accepted {
+                extra.remote_sdp = Some(b.sdp.clone());
+                extra.video = b.video;
+            }
+            acts
         }
         call_kind::ANSWER => {
             let b: call::AnswerBody = serde_json::from_str(body)
