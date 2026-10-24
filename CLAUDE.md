@@ -147,17 +147,45 @@ android/app/app/src/main/java/io/anonchat/
 ### 4.5 通话代际（generation）
 
 重协商必须带代际号：`on_answer` 严格匹配 `awaiting`，`on_ice` 丢弃 `gen < self.gen`，
-重放/旧 offer 忽略，glare 时"代际高者赢、同代际主叫赢"。
+重放/旧 offer 忽略，glare 时"代际高者赢、同代际主叫赢"，**低于本端代际的
+restart offer 一律拒**（`peer_gen < gen < self.gen` 的中间值曾从守卫缝隙漏进去
+被采纳，双方 SDP 交叉错位且无法自愈——审计 P2-3）。
 **别给 `gen == 0` 开"兼容旧版"的后门**——那正好放过要丢的过期信令。
 
-### 4.6 DHT 的三个必做防御
+### 4.6 信令的 API 边界：只透出"被接受"的 SDP
+
+`call_inbound` 组装 CallEvent 时，**offer 的 remote_sdp/video 只能在状态机
+判定"接受"后带出**（用 `on_offer_ex` 的 accepted 标志，仿照 ICE 分支）。
+无条件透出的话：忙线拒接的第三方 offer 会污染正在进行的通话、被代际守卫
+丢弃的迟到 SDP 会复活、重投的 offer 会反复触如来电准备路径（审计 P1-2）。
+
+### 4.7 密文离开本机之前，棘轮必须已落盘
+
+`send_batch`/`send_kind` 都是"先加密推进棘轮 → 再走网络"。任何
+"投递成功才 save"的写法，在中途失败时会把棘轮回滚到已投出的密钥之前——
+对端把后续消息判 Duplicate 静默吞掉，或 MAC 失败无限重投（审计 P1-3）。
+
+### 4.8 DHT 的三个必做防御 + 解析器的两条铁律
 
 来源 IP 校验 + 事务 ID 校验 + 重复记录检测，缺一不可。
 另外：bootstrap 域名普遍被污染（会解析到无关地址），所以
 `STATIC_SEEDS` 必须无条件参与，且**不要**拿 bootstrap 种子直接 `get_peers`——
 那些节点离服务键太远，手里没有记录，必须先 `find_node` 爬到附近。
+解析器两条铁律：bencode 字符串长度来自网络，**加法之前比长度**
+（usize 回绕曾绕过越界检查导致远程 panic，审计 P1-1）；递归深度上限
+`MAX_DEPTH=64`，放大接收缓冲前先确认这道闸还在。
 
-### 4.7 错误与文案
+### 4.9 网络读写的超时与原子落盘
+
+- 所有网络写必须有超时（`Conn::send` 10s）：零窗口/半开路径上写会无限
+  pending，而调用方持设备锁——不设超时就是静默挂死整个客户端（审计 P2-6）。
+- `save_self`/`save_contacts`/`save_turn` 一律 tmp+rename 原子写：这两个
+  文件有不持锁的读者，直接覆盖写到一半被读到就是半个 JSON（审计 P2-5）。
+- `Conn::sub` 可能带回订阅瞬间推来的积压第一条（返回 `Option`）——调用方
+  必须处理，不能吞（审计 P2-1）；解不开的坏帧按毒帧 ack + 连接回缓存
+  （审计 P2-2）。
+
+### 4.10 错误与文案
 
 - Rust 返回给 UI 的错误是**结构化错误码**（`AppError(ErrKind, detail)`），
   技术细节走 `detail`/`error` 通道（语言中性），用户可见文案由 `UiErrors.kt` 映射。
