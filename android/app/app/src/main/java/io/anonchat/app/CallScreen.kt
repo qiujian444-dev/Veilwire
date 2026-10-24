@@ -146,6 +146,14 @@ fun CallScreen(onClose: () -> Unit) {
                                 if (ui.renegotiating) stringResource(R.string.call_reconnecting) else stringResource(R.string.call_reconnect),
                                 if (ui.renegotiating) Color(0xFF4A3F2A) else Color(0xFF263238)
                             ) { CallManager.forceReconnect() }
+                            // 前后摄像头切换：只有视频通话有本地采集才显示。
+                            // 原地 switchCamera 不动 SDP，对端无感。
+                            if (ui.video) {
+                                RoundButton(
+                                    stringResource(R.string.call_switch_camera),
+                                    Color(0xFF263238)
+                                ) { CallManager.switchCamera() }
+                            }
                         }
                         Spacer(Modifier.height(24.dp))
                         RoundButton(stringResource(R.string.call_hangup), Color(0xFFE53935)) { CallManager.hangup(); onClose() }

@@ -16,6 +16,7 @@
     <string name="call_speaker_off">免提关</string>
     <string name="call_reconnect">重连</string>
     <string name="call_reconnecting">重连中</string>
+    <string name="call_switch_camera">翻转摄像头</string>
 
     <string name="call_state_incoming_video">视频通话呼入…</string>
     <string name="call_state_incoming_voice">语音通话呼入…</string>

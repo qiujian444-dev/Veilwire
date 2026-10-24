@@ -59,6 +59,8 @@ object CallManager {
         val iceState: String = "",
         val muted: Boolean = false,
         val speakerOn: Boolean = true,
+        /** 当前采集用的摄像头是否前置（视频通话界面据此决定是否显示切换按钮） */
+        val frontCamera: Boolean = true,
         val elapsedSecs: Long = 0,
         /// 正在重新协商（换网络后重建媒体通道）。通话本身没断。
         val renegotiating: Boolean = false,
@@ -682,6 +684,7 @@ object CallManager {
         val name = enum.deviceNames.firstOrNull { enum.isFrontFacing(it) }
             ?: enum.deviceNames.firstOrNull()
             ?: return
+        ui = ui.copy(frontCamera = enum.isFrontFacing(name))
         val c = enum.createCapturer(name, null) ?: return
         val helper = SurfaceTextureHelper.create("cap", eglBase?.eglBaseContext)
         // capturerObserver 是 VideoSource 自己的属性，由 initialize 注入，
@@ -752,6 +755,27 @@ object CallManager {
         val next = !ui.speakerOn
         routeAudio(next)
         ui = ui.copy(speakerOn = next)
+    }
+
+    /**
+     * 视频通话中切换前后摄像头。
+     *
+     * 用 CameraVideoCapturer.switchCamera 原地换：不重建 PeerConnection、
+     * 不动 SDP，对端只是继续收到同一视频轨上换了画面的帧，无需任何信令。
+     * 没有第二个摄像头（单摄设备）或 capturer 未就绪时静默忽略——按钮本来就
+     * 只在视频通话里出现，到不了这里的情形不值得报错打断通话。
+     */
+    fun switchCamera() {
+        val c = capturer ?: return
+        c.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
+            override fun onCameraSwitchDone(isFrontCamera: Boolean) {
+                ui = ui.copy(frontCamera = isFrontCamera)
+            }
+
+            override fun onCameraSwitchError(errorDescription: String?) {
+                Log.w(TAG, "switch camera failed: $errorDescription")
+            }
+        })
     }
 
     /**

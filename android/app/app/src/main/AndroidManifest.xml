@@ -90,5 +90,10 @@
             </intent-filter>
         </receiver>
 
+        <!-- Doze 逃生舱：进程被杀后由精确闹钟拉回（见 KeepaliveReceiver 注释） -->
+        <receiver
+            android:name=".KeepaliveReceiver"
+            android:exported="false" />
+
     </application>
 </manifest>

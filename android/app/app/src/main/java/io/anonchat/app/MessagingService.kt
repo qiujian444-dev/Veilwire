@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -63,6 +65,13 @@ class MessagingService : Service() {
          */
         var inboxTick by mutableStateOf(0)
             private set
+
+        /**
+         * 收消息循环是否在跑。KeepaliveReceiver 据此决定要不要拉起服务——
+         * 进程被杀后静态态归零，正好表达"需要复活"。
+         */
+        var isRunning: Boolean = false
+            private set
     }
 
     data class ServiceState(
@@ -100,6 +109,7 @@ class MessagingService : Service() {
                 startAsForeground()
                 if (loopJob == null) {
                     running = true
+                    isRunning = true
                     onlineSince = SystemClock.elapsedRealtime()
                     // 老版本升级上来的设备可能只有身份、没有收件队列（队列是生成邀请码时才申请的）。
                     // 没有队列就收不到任何消息，所以每轮启动都补一次（已有则只补中继）。
@@ -110,6 +120,9 @@ class MessagingService : Service() {
                     loopJob = scope.launch { listenLoop() }
                     statsJob = scope.launch { statsLoop() }
                 }
+                // Doze 逃生舱：无论服务是新起还是已被拉起，都续期下一个 9 分钟闹钟。
+                // 服务死亡 → 下一 tick 由 KeepaliveReceiver 复活（见其注释）。
+                KeepaliveReceiver.schedule(this)
                 publish()
             }
         }
@@ -264,12 +277,42 @@ class MessagingService : Service() {
                     updateForegroundNoti(relayDown = true)
                 }
                 publish()
-                delay(backoff)
+                // 退避等待，但**网络恢复要立刻重试**：Doze/断网结束的瞬间
+                // （亮屏、回 Wi-Fi、回蜂窝）是最可能成功的时机，干等满 60s
+                // 退避纯属浪费。waitForNetwork 有 1s 粒度的轮询上限，
+                // 网络一恢复最多 1 秒后就进下一轮 recv。
+                waitBackoffInterruptible(backoff)
                 backoff = min(backoff * 2, 60_000L)
             }
         }
         totalOnlineMs += SystemClock.elapsedRealtime() - onlineSince
         onlineSince = 0
+    }
+
+    /**
+     * 退避等待，但每秒检查一次网络可达性：等待期间网络一旦恢复就提前返回。
+     * 纯 [kotlinx.coroutines.delay] 会把"Doze 结束/网络切回"后的第一次重试
+     * 拖到退避计时器走完（最长 60 秒），白白放大收消息延迟。
+     */
+    private suspend fun waitBackoffInterruptible(totalMs: Long) {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: run {
+            delay(totalMs); return
+        }
+        val active = cm.activeNetwork
+        val wasUp = active != null && cm.getNetworkCapabilities(active)?.hasCapability(
+            NetworkCapabilities.NET_CAPABILITY_INTERNET
+        ) == true
+        var waited = 0L
+        while (waited < totalMs && running) {
+            delay(1_000)
+            waited += 1_000
+            val now = cm.activeNetwork
+            val up = now != null && cm.getNetworkCapabilities(now)?.hasCapability(
+                NetworkCapabilities.NET_CAPABILITY_INTERNET
+            ) == true
+            // 从"无网"变"有网"（或网络切换）→ 立即结束等待去重连
+            if (up != wasUp) return
+        }
     }
 
     private fun notifyMessage(inc: Incoming) {
@@ -335,6 +378,7 @@ class MessagingService : Service() {
 
     private fun shutdown() {
         running = false
+        isRunning = false
         loopJob?.cancel()
         statsJob?.cancel()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
