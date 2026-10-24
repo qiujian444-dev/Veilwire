@@ -260,7 +260,7 @@
     <!-- 聊天页 -->
     <string name="chat_empty">还没有消息。发一条试试。</string>
     <string name="stranger_add_hint">对方加了你，但还没在你的通讯录里。先加为联系人才能回复。</string>
-    <string name="stranger_no_clue">这条消息没带回信线索（可能是旧版本客户端发的），暂时没办法回复。让对方发一条新消息就行。</string>
+    <string name="stranger_no_clue">这条消息没带回信地址（对方发的时候，他那边还没建好自己的收件队列）。让他再发一条就行，新的那条就正常了。</string>
     <string name="stranger_add_reply">加为联系人并回复</string>
     <string name="input_hint">输入消息</string>
     <string name="action_send">发送</string>

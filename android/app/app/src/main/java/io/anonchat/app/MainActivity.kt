@@ -548,6 +548,7 @@ private fun RelayStep(onDone: () -> Unit) {
     // DHT 自动发现：null = 还没点过；空集 = 点过但没找到
     var discovering by remember { mutableStateOf(false) }
     var dhtFound by remember { mutableStateOf<Int?>(null) }
+    var err by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         val (l, s) = withContext(Dispatchers.IO) { RelayList.load(ctx) }
@@ -563,9 +564,19 @@ private fun RelayStep(onDone: () -> Unit) {
 
     fun use(url: String) {
         busyWith = url
+        err = null
         kotlinx.coroutines.MainScope().launch {
-            Repo.setRelay(ctx, url.trim())
-            onDone()
+            val r = Repo.setRelay(ctx, url.trim())
+            busyWith = null
+            // 失败必须拦住：`setRelay` 会顺手建收件队列，它失败就等于
+            // "这台设备没有收件地址"。此前这里忽略返回值直接 onDone()，
+            // 用户带着一个空队列进主界面，之后发出的每条消息都不带 reply_qid，
+            // 对方看到的是"没有回信线索，无法回复"，还以为是版本问题。
+            if (r.ok) {
+                onDone()
+            } else {
+                err = errText(ctx, r)
+            }
         }
     }
 
@@ -578,6 +589,9 @@ private fun RelayStep(onDone: () -> Unit) {
             stringResource(R.string.relay_hint),
             style = MaterialTheme.typography.bodySmall
         )
+        err?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
 
         when {
             loading -> Text(stringResource(R.string.relay_loading))
@@ -1216,6 +1230,8 @@ private fun previewText(p: Preview): String {
             stringResource(
                 if (p.byMe) R.string.recall_note_mine else R.string.recall_note_peer
             )
+        // 与聊天页气泡走同一套资源，避免同一件事在列表和气泡里说法不一样
+        is Preview.Call -> callPreviewText(p)
     }
     return if (p.failed) stringResource(R.string.preview_failed, base) else base
 }
@@ -3219,6 +3235,29 @@ private fun SafetyDialog(peer: String, verifiedNow: Boolean, onClose: (Boolean) 
             }
         }
     )
+}
+
+/** 会话列表里的通话记录一行文案；与 [callLogText] 共用同一批资源 */
+@Composable
+private fun callPreviewText(p: Preview.Call): String {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val mmss = "%02d:%02d".format(p.durSec / 60, p.durSec % 60)
+    return when (p.reason) {
+        "declined" -> ctx.getString(
+            if (p.fromPeer) R.string.call_end_declined else R.string.calllog_declined_me
+        )
+        "busy" -> ctx.getString(R.string.call_end_busy)
+        "no_answer" -> ctx.getString(
+            if (p.fromPeer) R.string.call_end_no_answer else R.string.calllog_no_answer_me
+        )
+        "missed" -> ctx.getString(R.string.call_end_missed)
+        "local_ended" ->
+            if (p.durSec > 0) ctx.getString(R.string.calllog_ongoing, mmss)
+            else ctx.getString(R.string.calllog_cancelled)
+        else ->
+            if (p.durSec > 0) ctx.getString(R.string.calllog_ongoing, mmss)
+            else ctx.getString(R.string.calllog_ended)
+    }
 }
 
 /**

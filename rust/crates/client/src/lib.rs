@@ -930,14 +930,80 @@ pub fn send_batch(dir: &str, to: &str, kind: &str, bodies: &[String]) -> Result<
     Ok(ids)
 }
 
+/// 补一个收件队列，并写回 `self.json`。
+///
+/// 调用方必须已经持有设备锁（`send_kind` / `ensure_queue` 都在锁内），
+/// 所以这里不碰 `dev_lock`——它对同一目录不可重入。
+///
+/// 候选顺序：自己记过的中继 → 本次要投递的那台（`fallback`）。
+///
+/// 为什么要带上 `fallback`：消息正要往他那台发，说明那台**此刻是通的**；
+/// 而自己记的可能是早就下线的旧地址（换过中继、或那台中继停了）。
+/// 真机上就出现过这种情况：手机端配的中继失效，于是 `ensureQueue` 一直失败、
+/// 队列迟迟建不起来，发出去的消息全都不带回信地址。
+///
+/// 全部候选都失败才报错——宁可让用户看到"发不出去"，也不要悄悄发一条对方回不了的。
+fn ensure_own_queue(dir: &Path, me: &mut SelfState, fallback: &str) -> Result<String> {
+    let mut cands: Vec<String> = me.relays.clone();
+    let fb = fallback.trim();
+    if !fb.is_empty() && !cands.iter().any(|r| r == fb) {
+        cands.push(fb.to_string());
+    }
+    if cands.is_empty() {
+        return Err(anyhow!("还没有配置中继，无法建立收件队列"));
+    }
+
+    let mut last: Option<anyhow::Error> = None;
+    for relay in &cands {
+        let made = rt().block_on(async {
+            let mut c = Conn::connect(relay).await?;
+            let q = c.new_queue().await?;
+            c.sub(&q).await?;
+            Ok::<String, anyhow::Error>(q)
+        });
+        match made {
+            Ok(q) => {
+                me.qid = Some(q.clone());
+                if !me.relays.iter().any(|r| r == relay) {
+                    me.relays.push(relay.clone());
+                }
+                save_self(dir, me)?;
+                warn(format!("已补建收件队列 {q}（{relay}）"));
+                return Ok(q);
+            }
+            Err(e) => {
+                warn(format!("在中继 {relay} 上建队列失败: {e:#}"));
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("所有中继都建不了队列")))
+}
+
 fn send_kind(dir: &str, to: &str, kind: &str, text: &str, body: Option<&str>) -> Result<String> {
     let dir = PathBuf::from(dir);
     // 发送也要占设备锁：加密会推进棘轮，并发的收/发互相覆盖会让会话状态错乱
     let lock = dev_lock(&dir);
     let _guard = lock.lock().expect("设备锁中毒");
     let mut dev = Device::load(&dir)?;
-    let me = load_self(&dir)?;
+    let mut me = load_self(&dir)?;
     let c = find_contact(&dir, to)?;
+
+    // 发消息前先确保自己有队列。
+    //
+    // 为什么必须在这里兜：载荷里的 `reply_qid` 直接取自 `me.qid`，没有队列
+    // 就等于告诉对方"我没法收信，别回了"——界面上显示成
+    // "这条消息没有回信线索（可能来自旧版客户端）"，可实际上原因在我们这边。
+    // 这个状态下对方无论做什么都回不了，只能干等，而且两边都不知道该修哪里。
+    //
+    // 什么情况下会没有队列：从老版本升上来（那时队列只在生成邀请码时才申请）、
+    // 或在离线时完成首启/加好友（`ensureQueue` 失败后没人重试）。
+    // 这些都是常态，不能靠"用户去设置里走一遍引导"来解决。
+    if me.qid.is_none() {
+        // 用"正要投递到的这台"当中继候选：它是此刻唯一确定可达的
+        let fb = c.relays.first().cloned().unwrap_or_default();
+        ensure_own_queue(&dir, &mut me, &fb)?;
+    }
 
     // 载荷 ID 由发送方生成、随消息传输：接收方存下来后，撤回消息靠它
     // 引用原消息（两条设备各自的本地行号对不上，只有这个 id 两边一致）

@@ -81,6 +81,15 @@ data class Msg(
                 "voice" -> Preview.Voice(durMs = Voice.parse(text)?.durMs ?: 0L)
                 "image" -> Preview.Image()
                 "video" -> Preview.Video()
+                "call" -> {
+                    val o = runCatching { JSONObject(text) }.getOrNull()
+                    if (o == null) Preview.Text(text) // 老数据是拼好的中文，原样显示
+                    else Preview.Call(
+                        reason = o.optString("r"),
+                        durSec = o.optLong("d", 0L),
+                        fromPeer = o.optBoolean("fp"),
+                    )
+                }
                 else -> Preview.Text(text)
             }
             // "未发出"是显示层的后缀，不是消息本身的一部分
@@ -92,6 +101,8 @@ data class Msg(
                 is Preview.Image -> base.copy(failed = true)
                 is Preview.Video -> base.copy(failed = true)
                 is Preview.Recall -> base.copy(failed = true)
+                // 通话记录不存在"发送失败"这个状态：它是本机写的
+                is Preview.Call -> base
             }
         }
 }
@@ -121,6 +132,15 @@ sealed interface Preview {
 
     /** 撤回提示。[byMe] = 是我撤的 */
     data class Recall(val byMe: Boolean, override val failed: Boolean = false) : Preview
+
+    /**
+     * 通话记录。
+     *
+     * 必须单独一个分支：它的 text 是结构化 JSON（`{"r":...}`），
+     * 落到 Text 分支就会把 `{"r":"local_ended","fp":false,"d":8}` 原样显示在
+     * 会话列表里——模拟器验收时就是这么撞见的。具体句子由 UI 按语言拼。
+     */
+    data class Call(val reason: String, val durSec: Long, val fromPeer: Boolean) : Preview
 }
 
 data class Incoming(

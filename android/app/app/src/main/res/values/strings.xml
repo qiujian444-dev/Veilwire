@@ -260,7 +260,7 @@
     <!-- Chat screen -->
     <string name="chat_empty">No messages yet. Say something.</string>
     <string name="stranger_add_hint">They added you, but they are not in your contacts yet. Add them as a contact to reply.</string>
-    <string name="stranger_no_clue">This message has no reply clue (it may be from an older client) and cannot be replied to for now. Ask them to send a new message.</string>
+    <string name="stranger_no_clue">This message carries no reply address — the sender\'s device had no inbox when it was sent. Ask them to send another message; that one will work.</string>
     <string name="stranger_add_reply">Add as contact and reply</string>
     <string name="input_hint">Message</string>
     <string name="action_send">Send</string>
