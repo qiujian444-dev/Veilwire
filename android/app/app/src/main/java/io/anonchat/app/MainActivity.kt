@@ -774,6 +774,17 @@ private fun ChatsTab(
             }
         }
     }
+    // 阅后即焚到期会改变预览/未读，但没有 inboxTick 信号（没新消息到达）。
+    // 会话里可能有焚毁消息时每秒轻扫一次，把已烧掉的预览同步掉（onChanged
+    // 触发外层 tick++ 重组）；没有焚毁消息时 sweepExpired 也是一次内存遍历，
+    // 会话数为几十的量级，代价可忽略。
+    LaunchedEffect(tick) {
+        while (true) {
+            delay(1_000)
+            val n = withContext(Dispatchers.IO) { Repo.sweepExpired() }
+            if (n > 0) onChanged()
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         // ---- 状态条：服务没跑、电池没授权，都比"联系人"更需要先被看到
@@ -2496,14 +2507,34 @@ private fun ChatScreen(
     }
 
     // 阅后即焚：进窗口就算"首次展示"（幂等，只记一次）；会话里有焚毁消息时
-    // 每秒走一格倒计时，顺带在聊天页内触发到期清扫
+    // 每秒走一格倒计时。
+    // 到期清理的 UI 同步不能依赖 sweepExpired 的返回值：服务层的全局清扫
+    // （MessagingService 每轮收消息后）可能先把消息删掉，聊天页再扫就是 0，
+    // 早先 `if (>0) localBump++` 于是永远不触发——存储里没了、界面上还挂着，
+    // 重进会话才消失（真机实测）。改成直接对比存储快照：焚毁消息从存储里
+    // 消失（无论被谁删的）就重载列表。
     LaunchedEffect(peer, msgs) {
         msgs.forEach { Repo.markSeen(peer, it) }
-        if (msgs.none { it.burn > 0 }) return@LaunchedEffect
+        val burnIds = msgs.filter { it.burn > 0 }.map { it.id }.toSet()
+        if (burnIds.isEmpty()) return@LaunchedEffect
+        // markSeen 就地改存储，不触发重载——UI 手里的 Msg 还是 seenAt=0 的旧
+        // 对象，角标会一直显示"未开始"。首次循环发现存储里的 seenAt 已生效
+        // 就 bump 一次，让列表换上带 seenAt 的新对象。
+        var seenSynced = msgs.all { it.seenAt > 0 }
         while (true) {
             delay(1_000)
             burnTick++
-            if (Repo.sweepExpired(peer) > 0) localBump++
+            Repo.sweepExpired(peer)
+            val storeMsgs = withContext(Dispatchers.IO) { Repo.messagesOf(peer) }
+            val stillThere = storeMsgs.any { it.id in burnIds }
+            if (!stillThere) {
+                localBump++
+                return@LaunchedEffect
+            }
+            if (!seenSynced) {
+                seenSynced = storeMsgs.all { it.burn <= 0 || it.seenAt > 0 }
+                if (seenSynced) localBump++
+            }
         }
     }
 
@@ -3308,6 +3339,28 @@ private fun formatTs(ts: Long): String {
     return SimpleDateFormat(fmt, locale).format(d)
 }
 
+/**
+ * 阅后即焚倒计时角标，贴在任意气泡（文字/图片/视频/文件/语音）旁边。
+ *
+ * 早先只有文字气泡有这个角标，媒体类"静默焚毁"——真机实测反馈体验割裂：
+ * 用户看不出带焚毁的图片和普通图片有什么区别，更不知道它什么时候会消失。
+ * 未展示（seenAt=0）时显示全额档位（30s/5m），展示后按秒倒计。
+ */
+@Composable
+private fun BurnBadge(m: Msg, nowSecs: Long, bottomPad: Boolean) {
+    if (m.burn <= 0) return
+    // 没展示过（seenAt=0，比如刚发出的那几秒、或从通知预览过）显示全额档位，
+    // 展示后按秒倒计。与旧文字角标行为一致。
+    val left = if (m.seenAt > 0) Burn.remaining(m.burn, m.seenAt, nowSecs) else m.burn
+    Spacer(Modifier.width(4.dp))
+    Text(
+        "${left}s",
+        fontSize = 11.sp,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.padding(bottom = if (bottomPad) 4.dp else 0.dp),
+    )
+}
+
 @Composable
 private fun Bubble(
     m: Msg,
@@ -3451,6 +3504,7 @@ private fun Bubble(
                     }
                 }
             }
+            BurnBadge(m, nowSecs, bottomPad = false)
         }
         return
     }
@@ -3499,6 +3553,7 @@ private fun Bubble(
                     )
                 }
             }
+            BurnBadge(m, nowSecs, bottomPad = false)
         }
         return
     }
@@ -3551,6 +3606,7 @@ private fun Bubble(
                     color = if (playing) skin.accent else skin.bubbleText
                 )
             }
+            BurnBadge(m, nowSecs, bottomPad = false)
         }
         return
     }
@@ -3562,10 +3618,6 @@ private fun Bubble(
     // 红色感叹号只有"发送失败且还没重发成功"的文字消息才有；
     // 微信同款交互：点感叹号直接重发，不弹确认（失败的代价用户已经付过一次了）
     val failed = m.outgoing && m.failed
-    // 焚毁倒计时（只给文字气泡显示；文件类静默焚毁）。没展示过就显示全额
-    val burnLeft = if (m.burn > 0) {
-        if (m.seenAt > 0) Burn.remaining(m.burn, m.seenAt, nowSecs) else m.burn
-    } else Long.MAX_VALUE
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = if (m.outgoing) Arrangement.End else Arrangement.Start,
@@ -3662,16 +3714,8 @@ private fun Bubble(
                 )
             }
         }
-        // 焚毁倒计时：贴在气泡旁边，按秒跳。火苗 + 秒数，不用解释
-        if (burnLeft != Long.MAX_VALUE) {
-            Spacer(Modifier.width(4.dp))
-            Text(
-                "${burnLeft}s",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-        }
+        // 焚毁倒计时：贴在气泡旁边，按秒跳（BurnBadge 见顶部；文字气泡有底部对齐）
+        BurnBadge(m, nowSecs, bottomPad = true)
     }
 }
 

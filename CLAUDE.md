@@ -21,7 +21,7 @@
 | Android 客户端 | Kotlin + Compose | `android/app/` | UI、通知、WebRTC、相册/相机、前台服务 |
 | 中继 | Rust（同一个 workspace） | `rust/crates/relay/` | 无标识队列 + 内嵌 TURN + DHT 自公布 |
 
-**当前版本**：`0.15.4` / `versionCode 31`（见 `android/app/app/build.gradle.kts`）
+**当前版本**：`0.15.5` / `versionCode 32`（见 `android/app/app/build.gradle.kts`）
 **协议版本**：`proto::PROTOCOL_VERSION`，改帧结构必须同时考虑旧客户端兼容性。
 
 ---
@@ -174,6 +174,7 @@ android/app/app/src/main/java/io/anonchat/
 | 任务 | 步骤 |
 |---|---|
 | 加一条用户可见文案 | 改两份 `strings.xml` → 若是错误则加 `ErrKind` + `UiErrors` → 跑 Android 单测 |
+| 改阅后即焚 UI | 倒计时角标统一走 `BurnBadge`（`MainActivity.kt`，五种气泡共用）；到期清理的 UI 刷新**不要依赖 `sweepExpired` 返回值**（服务层全局清扫会抢先删掉，返回 0），用存储快照对比触发 `localBump++` |
 | 加一个协议帧 | 改 `proto` 的 `ClientFrame`/`ServerFrame` → 中继处理 → client 调用 → **考虑旧客户端能不能解析**（serde 遇到未知 tag 直接失败） |
 | 改发送/路由 | 先读 4.2，改完跑 `relay_failover` / `cross_relay_routing` / `reply_clue` |
 | 改通话 | 改 `call.rs` 状态机要同步加单测；UI 侧看 `CallManager` 的 `ui` 状态 |
