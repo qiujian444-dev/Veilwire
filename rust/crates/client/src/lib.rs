@@ -260,8 +260,16 @@ fn note_decrypt_fail(kind: secure::FailKind, from: &str, mt: usize, detail: &str
     } else {
         "保留在队列中（未确认）"
     };
+    // mt=1（既有会话的普通消息）解不开，最常见的原因是**对方重装/恢复了身份**：
+    // 恢复短语只恢复 Ed25519 身份，X25519 会话密钥会重新生成，他自用的旧棘轮
+    // 就再也对不上了。给用户一句可行动的提示，别让他对着技术术语干瞪眼。
+    let hint = if mt == 1 && matches!(kind, secure::FailKind::BadMac | secure::FailKind::NoSession) {
+        "。提示：对方可能重装或恢复过 App——恢复短语只恢复身份、不恢复加密会话；请让对方重新生成邀请码、双方重新互加即可恢复"
+    } else {
+        ""
+    };
     warn(format!(
-        "无法解密来自 {from} 的消息 [mt={mt} {}] {tail}，同类累计 {n} 条: {detail}",
+        "无法解密来自 {from} 的消息 [mt={mt} {}] {tail}，同类累计 {n} 条: {detail}{hint}",
         kind.as_str()
     ));
 }
@@ -725,9 +733,20 @@ pub fn add(dir: &str, code: &str, alias: Option<&str>) -> Result<String> {
     dev.save(&dir)?;
 
     let mut cs = load_contacts(&dir)?;
-    // 重复加同一个好友时保留原有备注：重新扫码不该把用户起的名字抹掉
-    let old_alias = cs.iter().find(|c| c.dh == inv.dh).and_then(|c| c.alias.clone());
-    cs.retain(|c| c.dh != inv.dh);
+    // 同一个人的判定：pk 相同**或** dh 相同。
+    // pk 是 Ed25519 身份（12 词恢复后不变），dh 是 X25519 会话密钥（重装会换新）。
+    // 只按 dh 去重的话，对方恢复身份后重新出码，这里会追加第二个条目，
+    // 旧条目指向已废弃的队列——投进去的消息永远无人消费（实测踩过：
+    // 同一个人分裂成新旧两个联系人，旧条目发消息静默丢进黑洞）。
+    // 信任级别与首次添加相同：邀请码本身就是带外交付的一次性凭据。
+    let old_alias = cs
+        .iter()
+        .find(|c| c.pk == inv.pk || c.dh == inv.dh)
+        .and_then(|c| c.alias.clone())
+        // 已有备注优先（重新扫码不该抹掉用户起的名字）；没有才用这次传入的。
+        // 早先这里直接用 old_alias——首次添加带 alias 时会被静默丢弃。
+        .or_else(|| alias.map(|s| s.to_string()));
+    cs.retain(|c| c.pk != inv.pk && c.dh != inv.dh);
     cs.push(Contact {
         name: name.clone(),
         pk: inv.pk,
@@ -833,13 +852,20 @@ pub fn add_from_card(
     }
 
     let mut cs = load_contacts(&dir)?;
-    // 已经是联系人：只刷新路由，别改名（用户可能自己起过别名）
-    if let Some(existing) = cs.iter_mut().find(|c| c.dh == dh) {
+    // 已经是联系人：只刷新路由，别改名（用户可能自己起过别名）。
+    // 匹配放宽到 pk：对方重装恢复身份后 dh 会换，但 pk 不变——
+    // 只按 dh 找会漏掉旧条目，让它继续指向死队列。
+    if let Some(existing) = cs
+        .iter_mut()
+        .find(|c| c.dh == dh || (!pk.is_empty() && c.pk == pk))
+    {
         existing.qid = qid;
         existing.relays = relays;
-        if existing.pk.is_empty() {
+        if existing.pk.is_empty() && !pk.is_empty() {
             existing.pk = pk.to_string();
         }
+        // 同身份换 dh（重装恢复）：把条目迁到新会话上，旧 dh 作废
+        existing.dh = dh.to_string();
         let n = existing.name.clone();
         save_contacts(&dir, &cs)?;
         return Ok(n);
@@ -1912,6 +1938,103 @@ mod tests {
         let e = send(&d, "Nobody", "hi").unwrap_err().to_string();
         assert!(e.contains("找不到联系人"), "实际: {e}");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// 对方重装恢复身份：pk 不变、dh 换新。重新用他的新码添加必须**合并**
+    /// 而不是追加——旧条目指向已废弃的队列，留着就是死信箱。
+    #[test]
+    fn add_merges_same_pk_with_new_dh() {
+        let da = tmpdir("mg");
+        let db = tmpdir("mg2");
+        init(&da, Some("Alice")).unwrap();
+        init(&db, Some("Bob")).unwrap();
+
+        // 第一次：正常添加 Bob
+        let mut bob = Device::load(Path::new(&db)).unwrap();
+        let b1 = bob.bundle();
+        let inv1 = identity::Invite::new(
+            b1.pk.clone(),
+            b1.dh.clone(),
+            b1.otk.clone(),
+            proto::new_queue_id(),
+            vec!["ws://127.0.0.1:1".into()],
+        )
+        .unwrap()
+        .with_name("Bob");
+        add(&da, &inv1.encode(), Some("老王备注")).unwrap();
+        // 用户自己起的别名必须在合并后保留
+        assert_eq!(contacts(&da).unwrap()[0].alias.as_deref(), Some("老王备注"));
+
+        // 第二次：Bob 重装恢复（pk 相同、dh/otk/qid 全新）后出的新码
+        let mut bob2 = Device::load(Path::new(&db)).unwrap();
+        let b2 = bob2.bundle();
+        let new_dh = b2.dh.clone();
+        let inv2 = identity::Invite::new(
+            b1.pk, // 身份没变
+            b2.dh, // dh 是新的
+            b2.otk,
+            proto::new_queue_id(),
+            vec!["ws://127.0.0.1:2".into()],
+        )
+        .unwrap()
+        .with_name("BobNew");
+        add(&da, &inv2.encode(), None).unwrap();
+
+        let cs = contacts(&da).unwrap();
+        assert_eq!(cs.len(), 1, "同 pk 必须合并成一条，实际: {cs:?}");
+        assert_eq!(cs[0].dh, new_dh, "路由必须指向新 dh");
+        assert_eq!(cs[0].name, "BobNew");
+        assert_eq!(cs[0].alias.as_deref(), Some("老王备注"), "用户备注不能被重装抹掉");
+        assert_eq!(cs[0].relays, vec!["ws://127.0.0.1:2".to_string()]);
+
+        std::fs::remove_dir_all(&da).ok();
+        std::fs::remove_dir_all(&db).ok();
+    }
+
+    /// 回邀路径同样要合并：同 pk 换 dh 时旧条目必须迁到新 dh 上。
+    #[test]
+    fn add_from_card_merges_same_pk_with_new_dh() {
+        let da = tmpdir("mc");
+        let db = tmpdir("mc2");
+        init(&da, Some("Alice")).unwrap();
+        init(&db, Some("Bob")).unwrap();
+
+        let mut bob = Device::load(Path::new(&db)).unwrap();
+        let b1 = bob.bundle();
+        let inv1 = identity::Invite::new(
+            b1.pk.clone(),
+            b1.dh.clone(),
+            b1.otk.clone(),
+            proto::new_queue_id(),
+            vec!["ws://127.0.0.1:1".into()],
+        )
+        .unwrap()
+        .with_name("Bob");
+        add(&da, &inv1.encode(), None).unwrap();
+
+        // Bob 重装恢复后从陌生人消息回邀：dh 是新会话的，pk 不变
+        let mut bob2 = Device::load(Path::new(&db)).unwrap();
+        let b2 = bob2.bundle();
+        let new_dh = b2.dh.clone();
+        // Alice 这边要先有与新 dh 的会话（信任闸：has_session）
+        let mut alice = Device::load(Path::new(&da)).unwrap();
+        alice.start_session(&b2.dh, &b2.otk).unwrap();
+        alice.save(Path::new(&da)).unwrap();
+
+        let name = add_from_card(
+            &da, "BobNew", &b2.dh, &b1.pk, &proto::new_queue_id(),
+            &["ws://127.0.0.1:2".to_string()],
+        )
+        .unwrap();
+
+        let cs = contacts(&da).unwrap();
+        assert_eq!(cs.len(), 1, "回邀同 pk 也必须合并，实际: {cs:?}");
+        assert_eq!(cs[0].dh, new_dh);
+        assert_eq!(name, "Bob", "合并时保留旧条目的名字，不采用自报新名");
+        assert_eq!(cs[0].relays, vec!["ws://127.0.0.1:2".to_string()]);
+
+        std::fs::remove_dir_all(&da).ok();
+        std::fs::remove_dir_all(&db).ok();
     }
 
     /// 备份 → 清空 → 恢复：身份必须一模一样。这是恢复短语存在的全部意义。

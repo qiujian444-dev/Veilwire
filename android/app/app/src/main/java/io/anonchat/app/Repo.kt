@@ -510,8 +510,21 @@ object Repo {
     }
 
     fun add(code: String, alias: String?): Res<String> {
+        // 合并重装身份：同一身份（pk）换了 dh 时，Rust 侧会把联系人条目换成新 dh。
+        // 这里记下添加前同 pk 条目的旧 dh，添加成功后把旧 dh 键下的会话历史
+        // 一并搬到新 dh 下——否则旧会话会以"未加联系人的陌生人"残留在列表里，
+        // 而它对应的路由早已是死信箱。
+        val before = contacts().filter { it.pk.isNotBlank() }.associateBy { it.pk }
         val (d, e) = envelope(Native.add(dir, code.trim(), alias))
-        if (e == null) ensureQueue()
+        if (e == null) {
+            for (c in contacts()) {
+                val old = before[c.pk]
+                if (old != null && old.dh != c.dh) {
+                    moveConversation(old.dh, c.dh, renameCard = false)
+                }
+            }
+            ensureQueue()
+        }
         return Res(d as? String, e)
     }
 
@@ -1429,6 +1442,11 @@ object Repo {
     fun addPeer(conv: String): Res<String> {
         val card = cardOf(conv)
             ?: return Res(null, err = AppError(ErrKind.ADD_NO_CLUE))
+        // 同一身份（pk）已有别的 dh 条目 = 对方重装恢复过：回邀合并后要把
+        // 旧 dh 键下的历史搬到新 dh（card.dh）下，理由同 [add]。
+        val oldDh = card.pk.takeIf { it.isNotBlank() }?.let { pk ->
+            contacts().firstOrNull { it.pk == pk && it.dh != card.dh }?.dh
+        }
         val (d, e) = envelope(
             Native.addFromCard(dir, card.name, card.dh, card.pk, card.qid, JSONArray(card.relays).toString())
         )
@@ -1448,6 +1466,10 @@ object Repo {
         val target = card.dh
         if (conv != target) {
             moveConversation(conv, target, renameCard = false)
+        }
+        // 重装合并：旧 dh 的历史也归到新 dh 下
+        if (oldDh != null && oldDh != target) {
+            moveConversation(oldDh, target, renameCard = false)
         }
         return Res(name, null)
     }

@@ -423,6 +423,7 @@
     <string name="msg_svc_title">Receiving messages</string>
     <string name="msg_svc_text_ok">Connection established</string>
     <string name="msg_svc_text_battery">Allow the battery optimisation exemption, or the connection drops when the screen is off</string>
+    <string name="msg_svc_text_relay_down">Not receiving messages: the relay is unreachable. You can switch to another relay in Settings</string>
     <string name="msg_channel">New messages</string>
     <string name="msg_channel_desc">Alerts for new messages (with sound and vibration)</string>
     <string name="notif_new_message">New message</string>

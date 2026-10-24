@@ -117,16 +117,29 @@ class MessagingService : Service() {
     }
 
     private fun startAsForeground() {
+        updateForegroundNoti(relayDown = false)
+    }
+
+    /**
+     * 更新前台通知。中继持续连不上时把常驻文案切成"收不到消息 + 去设置换中继"，
+     * 恢复后切回电池提示——不新增通知渠道、天然去抖（只在状态翻转时变化）。
+     * 用户对"中继挂了"原本完全无感知，表现为"看似在线、永远收不到"。
+     */
+    private fun updateForegroundNoti(relayDown: Boolean) {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val text = if (relayDown) {
+            getString(R.string.msg_svc_text_relay_down)
+        } else if (BatteryOpt.isIgnoring(this)) {
+            getString(R.string.msg_svc_text_ok)
+        } else {
+            getString(R.string.msg_svc_text_battery)
+        }
         val noti: Notification = Notification.Builder(this, ensureChannel())
             .setContentTitle(getString(R.string.msg_svc_title))
-            .setContentText(
-                if (BatteryOpt.isIgnoring(this)) getString(R.string.msg_svc_text_ok)
-                else getString(R.string.msg_svc_text_battery)
-            )
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setOngoing(true)
             .setContentIntent(pi)
@@ -181,6 +194,8 @@ class MessagingService : Service() {
     /** 主循环：收 → 失败退避 → 再收。 */
     private suspend fun listenLoop() {
         var backoff = 2_000L
+        var failStreak = 0
+        var notifRelayDown = false
         while (scope.isActive && running) {
             // 循环体整体兜住异常：任何一次未捕获的异常都会让协程结束，
             // 而服务还"活着"、loopJob 也不为 null，于是再也不会重试 —— 表现为永久静默。
@@ -197,6 +212,12 @@ class MessagingService : Service() {
             Repo.drainWarnings().forEach { Log.w(TAG, "core warning: $it") }
             if (res.ok) {
                 backoff = 2_000L
+                failStreak = 0
+                // 从"中继故障"状态恢复：把前台通知文案切回去
+                if (notifRelayDown) {
+                    notifRelayDown = false
+                    updateForegroundNoti(relayDown = false)
+                }
                 // 处理段也必须兜住：通知/信令/状态发布的任何异常如果逃出这里，
                 // 协程直接结束，服务还"活着"但再也不收消息（永久静默）。
                 try {
@@ -235,6 +256,13 @@ class MessagingService : Service() {
                 lastError = res.error
                 Log.w(TAG, "receive failed: ${res.error}")
                 reconnects += 1
+                // 连续 3 轮失败（按 2s/4s/8s 退避约 15 秒）才提示：偶发抖动不打扰，
+                // 持续断连必须让用户知道"现在收不到消息，可以去设置换中继"
+                failStreak += 1
+                if (failStreak >= 3 && !notifRelayDown) {
+                    notifRelayDown = true
+                    updateForegroundNoti(relayDown = true)
+                }
                 publish()
                 delay(backoff)
                 backoff = min(backoff * 2, 60_000L)

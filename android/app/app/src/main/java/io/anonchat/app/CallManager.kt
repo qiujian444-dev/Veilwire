@@ -478,7 +478,15 @@ object CallManager {
                 // 接通才抢焦点：响铃期间先不动用户的音乐，接通瞬间才停
                 acquireAudioFocus()
                 startNetworkWatch()
-                ui = ui.copy(state = "active", peerDh = ev.peerDh, reason = ev.reason)
+                // renegotiating 必须跟着 ev 同步：重协商应答回来后 Rust 侧已复位为
+                // false，不同步的话 UI 会永远停在 "Reconnecting"，且把 canAutoRestartIce()
+                // 一起堵死（旧实现就是这个坑）。
+                ui = ui.copy(
+                    state = "active",
+                    peerDh = ev.peerDh,
+                    reason = ev.reason,
+                    renegotiating = ev.renegotiating,
+                )
                 // 重协商应答也会走到这里。只有第一次接通才记开始时间，
                 // 否则换一次网络通话计时就被清零了。
                 if (connectedAt == 0L) connectedAt = System.currentTimeMillis()
