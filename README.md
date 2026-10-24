@@ -51,7 +51,7 @@ apksigner verify --print-certs veilwire-0.13.1-arm64.apk | grep "SHA-256"
 Maintainers cut a release with:
 
 ```bash
-bash scripts/release.sh 0.13.1            # requires a clean tree and matching versionName
+bash scripts/release.sh 0.15.2            # requires a clean tree and matching versionName
 bash scripts/release.sh 0.13.1 --dry-run  # build + checksums only, no git/GitHub
 ```
 
@@ -86,6 +86,7 @@ rust/
   crates/proto/        protocol frames (identifier-less queues)
   crates/identity/     Ed25519 identity, invite codes, BIP39 phrase
   crates/secure/       end-to-end encryption (Olm, double ratchet)
+  crates/dht/          Mainline DHT (BEP5) client: relay announcement + client discovery
   crates/relay/        relay server (persistence + rate limiting) + embedded TURN + load tool
   crates/punch/        UDP hole punching and NAT behaviour probing
   crates/client/       client business layer shared by CLI and Android
@@ -93,8 +94,19 @@ rust/
   crates/android-jni/  JNI bridge exposing the client to Kotlin
 android/app/     the Android app (Compose + remoteMessaging foreground service)
 android/stage0/  early keep-alive demo, superseded by android/app
-scripts/         build-android.sh, test-android.sh, release.sh, turn_probe.py
+scripts/         build-android.sh, test-android.sh, release.sh, turn_probe.py, relay_check.py
 ```
+
+## Contributing / working with an AI assistant
+
+Read **[CLAUDE.md](./CLAUDE.md)** first. It covers the build and test commands, the
+directory map, the constraints that are easy to break (conversation keys, relay
+routing, call generations, DHT injection defences, error/localisation rules) and
+what to run before committing. `AGENTS.md` points at the same file.
+
+Documentation is kept in sync with the code — if a change alters behaviour,
+commands or guarantees, update `CLAUDE.md` or the relevant `docs/` page in the
+same commit.
 
 ## Quick start (Rust core, Windows/Git Bash)
 

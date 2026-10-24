@@ -75,7 +75,7 @@ apksigner verify --print-certs veilwire-0.13.1-arm64.apk | grep "SHA-256"
 维护者发版（构建 → 校验和 → 构建元数据 → 打 tag → 上传）：
 
 ```bash
-bash scripts/release.sh 0.13.1            # 需先改好 versionName，且工作区干净
+bash scripts/release.sh 0.15.2            # 需先改好 versionName，且工作区干净
 bash scripts/release.sh 0.13.1 --dry-run  # 只构建和打校验和，不碰 git/GitHub
 ```
 
@@ -101,6 +101,7 @@ rust/
   crates/proto/                                  # 协议帧定义（无标识队列）
   crates/identity/                               # Ed25519 身份、邀请码
   crates/secure/                                 # 端到端加密（Olm 双棘轮）
+  crates/dht/                                    # Mainline DHT（BEP5）：中继自公布 + 客户端发现
   crates/relay/                                  # 中继服务端（持久化 + 限流）+ 压测工具
   crates/punch/                                  # UDP 打洞 + NAT 映射行为探测
   crates/client/                                 # 客户端业务层（同步 API，CLI 与 Android 共用）
@@ -112,6 +113,15 @@ android/stage0/                                  # 早期的保活验证 demo，
 dist/                                            # 构建产物（APK）
 scripts/build-android.sh                         # 一键构建 APK
 ```
+
+## 参与开发 / 让 AI 助手接手
+
+先读 **[CLAUDE.md](./CLAUDE.md)**。里面有构建与测试命令、目录地图、那些容易踩坏的约定
+（会话键、中继路由、通话代际、DHT 注入防御、错误码与文案的对应关系），以及提交前该跑什么。
+`AGENTS.md` 只是指向同一份文件。
+
+文档与代码保持同步：改动影响了行为、命令或承诺，就在**同一个提交**里更新
+`CLAUDE.md` 或对应的 `docs/` 文档。
 
 ## 快速开始（Windows）
 
