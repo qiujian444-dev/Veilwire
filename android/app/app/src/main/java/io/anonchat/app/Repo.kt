@@ -581,6 +581,29 @@ object Repo {
      * 中继没开 TURN、或网络不通时返回 null：调用方应当回退到用户手填的配置。
      * 阻塞式调用（可能连一次中继），必须在 IO 线程。
      */
+    /**
+     * 只读本地缓存的 TURN 凭据（`turn.json`），**不发任何网络请求**。
+     *
+     * 存在的意义：进程重启后内存里的凭据没了，但磁盘上那份可能还有效。
+     * 早先 `CallManager` 只认内存，重启后要等一次成功的网络刷新才有 TURN——
+     * 那次刷新要是失败（刚开机没网），就会一直卡在"没有 TURN"，通话必然不通，
+     * 只有再重启一次才可能恢复。
+     */
+    fun turnCredsCached(): TurnCredsData? {
+        val f = File(deviceDir, "turn.json")
+        if (!f.exists()) return null
+        return runCatching {
+            val o = JSONObject(f.readText())
+            TurnCredsData(
+                url = o.optString("url"),
+                user = o.optString("user"),
+                pass = o.optString("pass"),
+                ttl = o.optLong("ttl"),
+                expiresAt = o.optLong("expires_at"),
+            ).takeIf { it.url.isNotBlank() && it.user.isNotBlank() }
+        }.getOrNull()
+    }
+
     fun turnCreds(): Res<TurnCredsData?> {
         val (d, e) = envelope(Native.turnCreds(dir))
         if (d !is JSONObject) return Res(null, e)
@@ -1302,10 +1325,24 @@ object Repo {
     fun messagesOf(who: String, from: Int = 0, to: Int = Int.MAX_VALUE): List<Msg> =
         store.slice(who, from, to)
 
-    /** 有消息但还没加为联系人的会话（只能看，不能回） */    fun unverifiedConversations(): List<String> {
+    /** 有消息但还没加为联系人的会话（只能看，不能回） */
+    fun unverifiedConversations(): List<String> {
+        val cs = contacts()
         // 会话键现在是 dh，已知集合也要按 dh 比
-        val known = contacts().map { it.dh }.toSet()
-        return store.keys().filter { it !in known && store.count(it) > 0 }
+        val known = cs.map { it.dh }.toSet()
+
+        // 防御存量脏数据：0.15.1 及更早版本在"加为联系人"时会把会话键
+        // 从 dh 搬到人名。键一旦变成人名就对不上 dh 集合，于是同一个人
+        // 会同时出现在"联系人"和"未加为联系人"两处，各自点进去行为还不一样。
+        // 重启时 migrateConversationKeys() 会把键迁回去，但用户不该为此重启。
+        // 这里把"键正好是某个联系人的名字/备注名"的一并排除。
+        val names = cs.mapNotNull { c ->
+            c.display.takeIf { it.isNotBlank() }
+        }.toSet() + cs.mapNotNull { c -> c.name.takeIf { it.isNotBlank() } }.toSet()
+
+        return store.keys()
+            .filter { store.count(it) > 0 }
+            .let { filterUnverifiedKeys(it, known, names) }
     }
 
     // 未读数见 unread/totalUnread()
@@ -1399,21 +1436,38 @@ object Repo {
         if (e != null || name.isNullOrBlank()) {
             return Res(null, error = e, err = if (e == null) AppError(ErrKind.ADD_FAILED) else null)
         }
-        moveConversation(conv, name)
+        // 会话键是 dh 的时候**不搬**：加好友只改变了显示名，会话本身没变。
+        //
+        // 早先这里无条件 `moveConversation(conv, name)`，把键从 dh 搬到人名。
+        // 而 `unverifiedConversations()` 是拿 store 的键跟联系人 dh 集合比对的，
+        // 搬完之后"人名"这个键对不上任何 dh，于是同一人被当成两条会话：
+        // 一条在联系人区（正常可聊），一条在"未加为联系人"区（还带"加为好友"按钮）。
+        // 重启时 `migrateConversationKeys()` 按"名字→dh"把它迁回去，所以重启就好了。
+        //
+        // 只有当 conv 还是旧版本的名字键时才搬，且目标是 dh 而不是人名。
+        val target = card.dh
+        if (conv != target) {
+            moveConversation(conv, target, renameCard = false)
+        }
         return Res(name, null)
     }
 
-    /** 会话改名：消息、未读、名片一起搬过去，别让用户在界面上"丢历史" */
-    private fun moveConversation(from: String, to: String) {
+    /**
+     * 搬会话键。消息、未读、名片一起搬过去，别让用户在界面上"丢历史"。
+     *
+     * [renameCard] 为 true 时才把卡片名改成新键——键是 dh 的时候不能改，
+     * 否则卡片名会变成一个哈希串，界面上直接显示它。
+     */
+    private fun moveConversation(from: String, to: String, renameCard: Boolean = true) {
         if (from == to) return
         // 消息迁移只写一条 mv 记录（日志里回放），不再整文件重写
         store.move(from, to)
         synchronized(msgLock) {
             val u = unread.remove(from)
             if (u != null) unread[to] = (unread[to] ?: 0) + u
-            // 卡片要跟着搬：留着旧键的话，新名字下没有对方公钥，安全码就再也算不出来
+            // 卡片要跟着搬：留着旧键的话，新键下没有对方公钥，安全码就再也算不出来
             val card = peerCards.remove(from)
-            if (card != null) peerCards[to] = card.copy(name = to)
+            if (card != null) peerCards[to] = if (renameCard) card.copy(name = to) else card
         }
         saveCards()
     }
@@ -1487,3 +1541,21 @@ object Repo {
         }
     }
 }
+
+/**
+ * "未加为联系人" 会话的过滤规则。
+ *
+ * 单独抽出来是为了能被单测覆盖——这段规则错过一次，代价是同一个联系人
+ * 在列表里出现两遍：一遍正常可聊，一遍还带着"加为好友"按钮。
+ *
+ * 两个排除条件各有来历：
+ * - [knownDh]：已经加为联系人，不该再出现在陌生人区；
+ * - [displayNames]：**存量脏数据防御**。0.15.1 及更早版本加好友时把会话键
+ *   从 dh 搬成了人名，键对不上 dh 集合，于是同一个人出现两次。
+ *   重启时 migrateConversationKeys() 会迁回去，但不该让用户靠重启解决。
+ */
+internal fun filterUnverifiedKeys(
+    keys: List<String>,
+    knownDh: Set<String>,
+    displayNames: Set<String>,
+): List<String> = keys.filter { it !in knownDh && it !in displayNames }

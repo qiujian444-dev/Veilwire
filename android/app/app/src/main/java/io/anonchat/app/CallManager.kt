@@ -134,18 +134,70 @@ object CallManager {
     @Volatile
     private var autoTurn: TurnCredsData? = null
 
-    /** 后台刷新 TURN 凭据。可重复调用，代价很小（有缓存） */
+    /** 正在刷新凭据（避免每通电话都开一个线程去打网络） */
+    @Volatile
+    private var turnRefreshing = false
+
+    /** 本次通话已因 ICE 失败自动重启过几次（成功连上会清零） */
+    @Volatile
+    private var iceRestarts = 0
+
+    /**
+     * 还允许自动重启吗。
+     *
+     * 设上限是必须的：网络彻底不通时 ICE 会反复 FAILED，
+     * 无上限就成了死循环，白白耗电、还一直在给对方发重协商。
+     */
+    private fun canAutoRestartIce(): Boolean =
+        iceRestarts < MAX_ICE_RESTARTS && ui.state == "active" && !ui.renegotiating
+
+    /**
+     * 后台刷新 TURN 凭据。
+     *
+     * 可重复调用；已在刷新时直接返回。**失败不会粘住**：下一次调用照样会重试。
+     * 这一点很关键——早先只在 `init` 里调一次，那次赶上没网就永久没有 TURN，
+     * 表现是"通话一直网络不通，重启 App 才好"。
+     */
     fun refreshTurnCreds() {
+        if (turnRefreshing) return
+        turnRefreshing = true
         Thread {
-            val r = Repo.turnCreds()
-            val c = r.data
-            if (c != null && c.remaining > 60) {
-                autoTurn = c
-                Log.i(TAG, "TURN credentials refreshed, ${c.remaining}s left")
-            } else if (c == null) {
-                Log.i(TAG, "no TURN credits from relay: ${r.error ?: "relay has no TURN"}")
+            try {
+                val r = Repo.turnCreds()
+                val c = r.data
+                if (c != null && c.remaining > 60) {
+                    autoTurn = c
+                    Log.i(TAG, "TURN credentials refreshed, ${c.remaining}s left")
+                } else if (c == null) {
+                    Log.i(TAG, "no TURN credits from relay: ${r.error ?: "relay has no TURN"}")
+                }
+            } finally {
+                turnRefreshing = false
             }
         }.apply { isDaemon = true; name = "turn-creds"; start() }
+    }
+
+    /**
+     * 取一份可用的 TURN 凭据：内存 → 磁盘缓存；两者都缺或快过期就顺手后台刷新。
+     *
+     * 为什么要退到磁盘：进程重启后内存是空的，而 `turn.json` 里那份往往还有效。
+     * 只认内存的话，重启后到下一次刷新成功之间打的电话全都没有 TURN。
+     */
+    private fun currentTurn(): TurnCredsData? {
+        val mem = autoTurn
+        if (mem != null && mem.remaining > 30) {
+            if (mem.remaining < 300) refreshTurnCreds()
+            return mem
+        }
+        val disk = Repo.turnCredsCached()
+        if (disk != null) {
+            autoTurn = disk
+            if (disk.remaining < 300) refreshTurnCreds()
+            return disk.takeIf { it.remaining > 30 }
+        }
+        // 一份都没有：立刻去要。本次通话可能仍用不上，但下一通就有了
+        refreshTurnCreds()
+        return null
     }
 
     // ------------------------------------------------------------ 初始化
@@ -201,14 +253,12 @@ object CallManager {
         //
         // 自动凭据过期就作废，泄露了影响窗口也有限；用户手填的那份仍然保留，
         // 用于中继没开 TURN、或你自己搭了 coturn 的情况。
-        val auto = autoTurn
-        if (auto != null && auto.remaining > 30) {
+        val auto = currentTurn()
+        if (auto != null) {
             val b = PeerConnection.IceServer.builder(normalizeTurnUrl(auto.url))
                 .setUsername(auto.user)
                 .setPassword(auto.pass)
             list.add(b.createIceServer())
-            // 快到期了顺手刷新一次，下次通话就能用新的（不阻塞当前流程）
-            if (auto.remaining < 300) refreshTurnCreds()
         } else {
             val turn = prefs?.getString("turn", "")?.trim().orEmpty()
             if (turn.isNotBlank()) {
@@ -233,6 +283,9 @@ object CallManager {
 
     /** 从粘贴的一行文本里拆出 TURN 地址和账号密码 */
     fun parseTurnLink(raw: String): TurnLink.Parsed? = TurnLink.parse(raw)
+
+    /** 一次通话里最多自动重启几次 ICE */
+    private const val MAX_ICE_RESTARTS = 3
 
     /** ICE 探测结果。relay > 0 才算 TURN 真的能用 */
     enum class IceErr { NOT_INIT, PC_FAILED }
@@ -878,8 +931,31 @@ object CallManager {
         override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState) {
             Log.i(TAG, "ICE state: $newState")
             ui = ui.copy(iceState = newState.name.lowercase())
-            if (newState == PeerConnection.IceConnectionState.FAILED) {
-                ui = ui.copy(err = AppError(ErrKind.CALL_NETWORK_DOWN))
+            when (newState) {
+                // 通了就把错误清掉。早先只在 FAILED 时设 err、从不清除，
+                // 于是"网络不通"那行红字会一直挂着，哪怕媒体早已恢复。
+                PeerConnection.IceConnectionState.CONNECTED,
+                PeerConnection.IceConnectionState.COMPLETED -> {
+                    iceRestarts = 0
+                    if (ui.err?.kind == ErrKind.CALL_NETWORK_DOWN) ui = ui.copy(err = null)
+                }
+
+                PeerConnection.IceConnectionState.FAILED -> {
+                    ui = ui.copy(err = AppError(ErrKind.CALL_NETWORK_DOWN))
+                    // 自动救一次：失败多半是 TURN 凭据过期、或网络切了之后旧候选全废。
+                    // 早先什么都不做，只能靠用户杀进程重开——那正是"重启才好"的来源。
+                    if (canAutoRestartIce()) {
+                        iceRestarts++
+                        Log.i(TAG, "ICE failed, auto restart #$iceRestarts")
+                        // 顺便补一次凭据：过期/缺失是这类失败的常见根因
+                        refreshTurnCreds()
+                        forceReconnect()
+                    } else {
+                        Log.w(TAG, "ICE failed, auto restart exhausted ($iceRestarts)")
+                    }
+                }
+
+                else -> {}
             }
         }
 
@@ -990,7 +1066,10 @@ object CallManager {
         }
     }
 
-    private fun resetPeer() = closePeer()
+    private fun resetPeer() {
+        iceRestarts = 0
+        closePeer()
+    }
 
     // ------------------------------------------------------------ SDP 观测器
 
