@@ -426,8 +426,13 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
 
             ClientFrame::Sub { qid } => {
                 let mut st = state.lock().await;
-                st.subs.entry(qid.clone()).or_default().push(tx.clone());
-                my_subs.push(qid.clone());
+                // 同连接对同队列重复 Sub：只注册一次。重复注册的话之后每条
+                // 消息这个连接会收到 N 份重复推送（客户端去重能兜，但白费带宽）。
+                let already = st.subs.get(&qid).map(|v| v.iter().any(|x| x.same_channel(&tx)));
+                if already != Some(true) {
+                    st.subs.entry(qid.clone()).or_default().push(tx.clone());
+                    my_subs.push(qid.clone());
+                }
                 // 先回确认，再补投积压。
                 // 顺序不能反：积压不为空时若跳过 OK 直接推 Msg，客户端在等
                 // "订阅确认"时会把第一条消息当成确认帧吞掉，那条消息就永久丢了。
@@ -551,6 +556,22 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
             // 每次请求都现签发一组新的：客户端换网络重连时会再来要，
             // 旧的自然过期，不需要吊销逻辑。
             ClientFrame::GetTurn => {
+                // 与 put/new 共享速率窗口：凭据表虽有过期清理，但不限速的话
+                // 一个脚本就能让服务端不停做哈希与表插入（轻微 DoS）。
+                if rate_limit > 0 {
+                    if window_start.elapsed() >= Duration::from_secs(60) {
+                        window_start = std::time::Instant::now();
+                        puts_in_window = 0;
+                    }
+                    if puts_in_window >= rate_limit {
+                        let _ = tx.send(ServerFrame::err(
+                            "rate_limited",
+                            format!("超过速率限制（{rate_limit} 条/分钟），请稍后重试"),
+                        ));
+                        continue;
+                    }
+                    puts_in_window += 1;
+                }
                 let url = {
                     let st = state.lock().await;
                     st.turn_url.clone()

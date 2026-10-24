@@ -757,8 +757,16 @@ pub fn add(dir: &str, code: &str, alias: Option<&str>) -> Result<String> {
         // 早先这里直接用 old_alias——首次添加带 alias 时会被静默丢弃。
         .or_else(|| alias.map(|s| s.to_string()));
     cs.retain(|c| c.pk != inv.pk && c.dh != inv.dh);
+    // 重名加后缀：两个人都叫 "Bob" 时必须并存，否则 find_contact 按名命中
+    // 第一个，发消息静默走错人（add_from_card 路径早有这套，这里补齐）。
+    let mut final_name = name.clone();
+    let mut i = 2;
+    while cs.iter().any(|c| c.name == final_name) {
+        final_name = format!("{name} {i}");
+        i += 1;
+    }
     cs.push(Contact {
-        name: name.clone(),
+        name: final_name.clone(),
         pk: inv.pk,
         dh: inv.dh,
         qid: inv.qid,
@@ -766,7 +774,7 @@ pub fn add(dir: &str, code: &str, alias: Option<&str>) -> Result<String> {
         alias: old_alias,
     });
     save_contacts(&dir, &cs)?;
-    Ok(name)
+    Ok(final_name)
 }
 
 pub fn send(dir: &str, to: &str, text: &str) -> Result<String> {
@@ -929,8 +937,16 @@ pub fn send_batch(dir: &str, to: &str, kind: &str, bodies: &[String]) -> Result<
     let lock = dev_lock(&dir);
     let _guard = lock.lock().expect("设备锁中毒");
     let mut dev = Device::load(&dir)?;
-    let me = load_self(&dir)?;
+    let mut me = load_self(&dir)?;
     let c = find_contact(&dir, to)?;
+
+    // "每条消息都必须能回信"：块消息和普通消息一样要带 reply_qid。
+    // send_kind 有这个兜底，这里漏了——新装设备直接发文件时，
+    // 对端收到的所有块都无法回信/加好友（对端 UI 显示没有回信线索）。
+    if me.qid.is_none() {
+        let fb = c.relays.first().cloned().unwrap_or_default();
+        ensure_own_queue(&dir, &mut me, &fb)?;
+    }
 
     // 先全部加密（推进棘轮），再走网络——加密是纯 CPU，别占着连接时间
     let mut wires = Vec::with_capacity(bodies.len());
@@ -1484,6 +1500,12 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
                         if updated {
                             warn(format!("对方 {dh} 更新了收件地址，路由已刷新"));
                         }
+                        // 连接还健康：放回缓存再返回。之前直接 return 把好连接
+                        // 扔了，每次 route 帧后下一轮 recv 都要白重连一次。
+                        cache()
+                            .lock()
+                            .expect("缓存锁中毒")
+                            .insert(key, (qid, relay, conn));
                         // 不递归（async fn 递归要装箱），直接当"这条不是聊天消息"返回；
                         // 上层服务是循环调用，下一轮马上继续取。
                         return Ok(None);

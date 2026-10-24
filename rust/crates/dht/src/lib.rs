@@ -102,14 +102,21 @@ fn enc(v: &Val, out: &mut Vec<u8>) {
 }
 
 pub fn bdecode(buf: &[u8]) -> Result<Val> {
-    let (v, used) = dec(buf, 0)?;
+    let (v, used) = dec(buf, 0, 0)?;
     if used != buf.len() {
         return Err(anyhow!("bencode 尾部有多余字节"));
     }
     Ok(v)
 }
 
-fn dec(b: &[u8], mut i: usize) -> Result<(Val, usize)> {
+/// 嵌套深度上限。当前 4096 字节接收缓冲下真实深度约 2048 层不会触发；
+/// 这道闸是防御性的——缓冲一旦放大（或换了调用点），没有它就是远程栈溢出。
+const MAX_DEPTH: usize = 64;
+
+fn dec(b: &[u8], mut i: usize, depth: usize) -> Result<(Val, usize)> {
+    if depth > MAX_DEPTH {
+        return Err(anyhow!("bencode 嵌套过深"));
+    }
     let c = *b.get(i).ok_or_else(|| anyhow!("bencode 越界"))?;
     match c {
         b'i' => {
@@ -125,7 +132,7 @@ fn dec(b: &[u8], mut i: usize) -> Result<(Val, usize)> {
             i += 1;
             let mut out = Vec::new();
             while *b.get(i).ok_or_else(|| anyhow!("列表越界"))? != b'e' {
-                let (v, n) = dec(b, i)?;
+                let (v, n) = dec(b, i, depth + 1)?;
                 out.push(v);
                 i = n;
             }
@@ -135,9 +142,9 @@ fn dec(b: &[u8], mut i: usize) -> Result<(Val, usize)> {
             i += 1;
             let mut m = BTreeMap::new();
             while *b.get(i).ok_or_else(|| anyhow!("字典越界"))? != b'e' {
-                let (k, n) = dec(b, i)?;
+                let (k, n) = dec(b, i, depth + 1)?;
                 let key = k.as_bytes().ok_or_else(|| anyhow!("字典 key 必须是字符串"))?.to_vec();
-                let (v, n2) = dec(b, n)?;
+                let (v, n2) = dec(b, n, depth + 1)?;
                 m.insert(key, v);
                 i = n2;
             }

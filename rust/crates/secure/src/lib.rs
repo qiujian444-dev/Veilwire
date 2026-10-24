@@ -807,8 +807,22 @@ impl Device {
             .map_err(|e| anyhow!("账户 pickle 解密失败: {e}"))?;
 
         let sess_raw = std::fs::read(dir.join(SESSIONS_FILE)).unwrap_or_else(|_| b"{}".to_vec());
-        let sess_map: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_slice(&sess_raw).unwrap_or_default();
+        let sess_map: serde_json::Map<String, serde_json::Value> = match serde_json::from_slice(&sess_raw)
+        {
+            Ok(m) => m,
+            Err(e) => {
+                // 文件级损坏必须吵闹：静默当空表 = 所有会话无声消失，用户只会
+                // 看到"联系人都在但消息解不开了"。保留坏文件供人工抢救。
+                let bad = dir.join(format!("{SESSIONS_FILE}.corrupt"));
+                let _ = std::fs::rename(dir.join(SESSIONS_FILE), &bad);
+                eprintln!(
+                    "[secure] sessions.json 损坏（{e}），已改名为 {}。\
+                     所有 Olm 会话丢失，需要对方重新互加才能恢复通信",
+                    bad.display()
+                );
+                serde_json::Map::new()
+            }
+        };
         let mut sessions: HashMap<String, Vec<Session>> = HashMap::new();
         for (dh, v) in sess_map {
             // 新格式：[pickle, ...]；旧格式：单个 pickle 字符串。都接受，

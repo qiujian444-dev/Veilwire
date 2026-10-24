@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 /// 振铃超时：超过这个时间没有应答就自动结束，避免"一直响"
 pub const RING_TIMEOUT_SECS: u64 = 45;
+/// 重协商超时：answer 迟迟不到就解除 renegotiating 标志（通话保持 Active）。
+/// 比 RING_TIMEOUT 短：卡在重协商的用户等 20 秒就应能再次手动重连。
+pub const RENEGOTIATE_TIMEOUT_SECS: u64 = 20;
 
 /// 单条 SDP 的长度上限。正常 offer 约 2~4KB，8KB 已经很宽松了。
 pub const MAX_SDP_LEN: usize = 8 * 1024;
@@ -161,6 +164,12 @@ pub struct Call {
     /// 本通电话我是主叫吗？双方同时重新协商时用它破僵局（主叫赢）。
     /// 用角色而不是身份比较：双方角色天然互补，不需要额外交换任何东西。
     caller: bool,
+    /// 我最近一次发出的 answer（SDP + 代际）。同通话的 offer 重发到达时
+    /// 用它补发——旧注释承诺过这件事，实际一直没做，主叫只能干等到超时。
+    last_answer: Option<(String, u64)>,
+    /// 进入 renegotiating 的时刻。answer 永不到达时（对端掉线）靠它超时退出，
+    /// 否则 UI 会永远停在"重建媒体通道"。
+    renegotiate_since: Option<u64>,
 }
 
 impl Default for Call {
@@ -184,6 +193,8 @@ impl Call {
             awaiting: None,
             peer_gen: 0,
             caller: false,
+            last_answer: None,
+            renegotiate_since: None,
         }
     }
 
@@ -308,10 +319,14 @@ impl Call {
 
     /// 本端产出的 answer 动作（被叫接听时用）
     pub fn make_answer_actions(&self, sdp: &str) -> Vec<Action> {
+        self.make_answer_actions_with_gen(sdp.to_string(), self.gen)
+    }
+
+    fn make_answer_actions_with_gen(&self, sdp: String, gen: u64) -> Vec<Action> {
         let body = AnswerBody {
             call_id: self.call_id.clone(),
-            sdp: sdp.to_string(),
-            gen: self.gen,
+            sdp,
+            gen,
         };
         vec![Action::Send {
             to_dh: self.peer_dh.clone(),
@@ -440,13 +455,21 @@ impl Call {
             }
 
             self.renegotiating = true;
+            self.renegotiate_since = Some(now);
             return (vec![self.state_action()], true);
         }
 
-        // 同一通电话的重发 offer：状态不变，但要把 answer 补发一次
-        // （对方可能没收到我先前的 answer）
+        // 同一通电话的重发 offer（对方没收到我先前的 answer）：状态不变，
+        // 把缓存里的 answer 补发一次。早先注释承诺了这件事但没做——主叫侧
+        // 收不到 answer 只能响到 45 秒超时。
         if self.call_id == body.call_id && matches!(self.state, State::Incoming | State::Active) {
-            return (vec![self.state_action()], true);
+            let mut acts = vec![self.state_action()];
+            if self.state == State::Active {
+                if let Some((sdp, gen)) = &self.last_answer {
+                    acts.extend(self.make_answer_actions_with_gen(sdp.clone(), *gen));
+                }
+            }
+            return (acts, true);
         }
 
         if self.state.is_busy() {
@@ -475,6 +498,12 @@ impl Call {
         self.awaiting = None;
         self.peer_gen = 0;
         self.caller = false;
+        // 去重表按通话清空：表只有 64 格，跨通话残留的旧 msg_id 一旦与
+        // 新信令 id 相撞（重发/上游 id 复用），新来电会被静默吞掉。
+        // 清空后必须把当前 msg_id 重新记上（mark_seen 在函数开头做过、
+        // 被这里抹掉了），否则同一条 offer 的重投会穿透去重。
+        self.seen.clear();
+        self.mark_seen(msg_id);
         self.enter(State::Incoming, now);
         (vec![self.state_action()], true)
     }
@@ -490,7 +519,10 @@ impl Call {
             return Vec::new();
         }
         self.renegotiating = false;
+        self.renegotiate_since = None;
         self.awaiting = None;
+        // 记下来：对方没收到这条 answer 而重发 offer 时，用缓存补发
+        self.last_answer = Some((sdp.to_string(), self.gen));
         self.enter(State::Active, now);
         let mut v = vec![self.state_action()];
         v.extend(self.make_answer_actions(sdp));
@@ -560,6 +592,7 @@ impl Call {
         self.awaiting = None;
         self.peer_gen = body.gen;
         self.renegotiating = false;
+        self.renegotiate_since = None;
         self.enter(State::Active, now);
         vec![self.state_action()]
     }
@@ -597,8 +630,13 @@ impl Call {
         if !self.state.is_busy() {
             return Vec::new();
         }
-        // 已被对方拒接（我方 Outgoing）也算结束
-        let _ = from_dh;
+        // 来源校验与 on_answer/on_ice 对齐：知道 call_id 不等于是对端本人。
+        // call_id 只在加密信令内传播，泄露面小，但防御口径必须一致。
+        // 注意拒接场景（Busy 时我方 reject、对方回 end 收尾）不会走到这——
+        // 那时状态已 Ended，is_busy 已经拦住了。
+        if from_dh != self.peer_dh {
+            return Vec::new();
+        }
         self.reason = if body.reason.is_empty() {
             "peer_ended".to_string()
         } else {
@@ -664,6 +702,20 @@ impl Call {
                     vec![self.state_action()]
                 }
             }
+            // 重协商卡死兜底：对端掉线时 answer 永远不来，UI 会永远停在
+            // "重建媒体通道"。超过重协商时限就本地解除标志——通话保持 Active
+            // （旧媒体通道能通就继续用），用户可再手动点一次重连。
+            State::Active if self.renegotiating => {
+                let since = self.renegotiate_since.unwrap_or(self.since);
+                if now.saturating_sub(since) >= RENEGOTIATE_TIMEOUT_SECS {
+                    self.renegotiating = false;
+                    self.renegotiate_since = None;
+                    self.awaiting = None;
+                    vec![self.state_action()]
+                } else {
+                    Vec::new()
+                }
+            }
             _ => Vec::new(),
         }
     }
@@ -675,6 +727,8 @@ impl Call {
             self.call_id.clear();
             self.peer_dh.clear();
             self.reason.clear();
+            // 同上：去重表只对"当前通话"有意义，回 Idle 一并清
+            self.seen.clear();
         }
     }
 }
@@ -787,6 +841,49 @@ mod tests {
             acts.first(),
             Some(Action::State { renegotiating: false, .. })
         ), "应答到达后必须清掉重协商标记");
+    }
+
+    /// 同通话的 offer 重发到达（对方没收到我的 answer）：必须用缓存把
+    /// answer 补发一次。早先只返回状态动作，主叫收不到应答只能响到超时。
+    #[test]
+    fn duplicate_offer_gets_cached_answer_resent() {
+        let mut b = Call::new();
+        b.on_offer(A, &offer("c1"), "m1", 100);
+        b.accept("v=0 my-answer", 101);
+        assert_eq!(b.state(), State::Active);
+
+        // 对端重投同一 offer（新 msg_id，绕过去重）
+        let (acts, accepted) = b.on_offer_ex(A, &offer("c1"), "m1-replay", 110);
+        assert!(accepted);
+        let ans = find_send(&acts, crate::call_kind::ANSWER).expect("应补发 answer");
+        match ans {
+            Action::Send { body, .. } => {
+                assert!(body.contains("my-answer"), "补发的必须是缓存的应答: {body}");
+                assert!(body.contains("\"gen\":0"), "首次通话补发 gen=0: {body}");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(b.state(), State::Active, "状态不能被重投的 offer 打乱");
+    }
+
+    /// 重协商的 answer 永不到达（对端掉线）：超时后必须本地解除 renegotiating，
+    /// 不能让 UI 永远停在"重建媒体通道"。通话保持 Active。
+    #[test]
+    fn renegotiation_times_out_and_recovers() {
+        let mut a = Call::new();
+        a.start_outgoing("c1", B, false, 100).unwrap();
+        a.on_answer(B, &answer("c1"), 101);
+        a.make_restart_offer_actions("v=0 restart"); // reneg 开始于 ~110
+
+        // 未到时限：不该有动作
+        assert!(a.tick(115).is_empty());
+        // 重协商超时：必须解除标记、保持 Active
+        let acts = a.tick(110 + RENEGOTIATE_TIMEOUT_SECS);
+        assert!(matches!(
+            acts.first(),
+            Some(Action::State { renegotiating: false, .. })
+        ), "超时后必须解除重协商标记");
+        assert_eq!(a.state(), State::Active, "通话保持，不走 Ended");
     }
 
     /// 旧通话的重协商信令必须忽略，否则会把当前通话搞乱
