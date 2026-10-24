@@ -1237,8 +1237,16 @@ object Repo {
      */
     fun drainWarnings(): List<String> {
         val (d, _) = envelope(Native.takeWarnings())
-        if (d !is JSONArray) return emptyList()
-        return (0 until d.length()).mapNotNull { d.optString(it).takeIf { s -> s.isNotEmpty() } }
+        val fromCore = if (d is JSONArray) {
+            (0 until d.length()).mapNotNull { d.optString(it).takeIf { s -> s.isNotEmpty() } }
+        } else emptyList()
+        // 本地消息日志的 IO 失败（磁盘满等）一并带出：内存已改、日志没写，
+        // 不说出去就是"消息发过又没了"且无人知晓。取走即清，避免每轮重复报。
+        val storeErr = store.lastIoError?.let {
+            store.clearIoError()
+            listOf("本地存储：$it")
+        } ?: emptyList()
+        return fromCore + storeErr
     }
 
     /** 把发送方 dh 映射成界面上显示的名字 */

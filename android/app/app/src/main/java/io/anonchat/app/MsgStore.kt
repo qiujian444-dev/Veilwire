@@ -38,6 +38,20 @@ class MsgStore(private val dir: File) {
     private val legacyFile = File(dir, "messages.json")
     private var writer: BufferedWriter? = null
 
+    /**
+     * 最近一次落盘失败的原因（null = 正常）。磁盘满/IO 错误时内存已改、
+     * 日志没写，用户看到的是"发过又没了"——必须能被上层发现并告警，
+     * 全静默等于数据丢失无人知晓。drainWarnings 会把它带出去。
+     */
+    @Volatile
+    var lastIoError: String? = null
+        private set
+
+    /** 告警被上层取走后清零，避免同一个错误每轮重复上报 */
+    fun clearIoError() {
+        lastIoError = null
+    }
+
     /** 所有会话 → 消息（按时间升序）。**只能通过本类的方法访问**，内部同步 */
     private val data = linkedMapOf<String, MutableList<Msg>>()
 
@@ -189,7 +203,7 @@ class MsgStore(private val dir: File) {
             // 单条只有几百字节，一次 write 系统调用，代价可以接受。
             w.flush()
             lines++
-        }
+        }.onFailure { lastIoError = "消息日志写入失败: ${it.message}" }
     }
 
     /**
@@ -249,7 +263,10 @@ class MsgStore(private val dir: File) {
                 tmp.delete()
             }
             lines = n
-        }.onFailure { tmp.delete() }
+        }.onFailure {
+            tmp.delete()
+            lastIoError = "消息日志重写失败: ${it.message}"
+        }
     }
 
     // ------------------------------------------------------------ 载入

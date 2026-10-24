@@ -417,17 +417,24 @@ impl Call {
             // 双方同时换网络会各自发重协商（glare）。规则：
             //   1. 对端代际更高 → 我方让路，放弃自己那个还没被应答的 offer
             //   2. 代际相同 → 主叫赢，被叫让路
+            //   3. 对端代际更低 → 一律拒。早先只拒 `<= peer_gen`，于是
+            //      `peer_gen < body.gen < self.gen` 的中间值从缝隙漏进去被采纳
+            //      （本端已推进到更高代际说明刚发过更新的重协商，这份是过时的），
+            //      双方 SDP 交叉错位且无任何超时兜底——"接通了但没声音"且永不恢复。
             // 让路时清掉 `awaiting`，这样迟到的"对我方 offer 的应答"会被拒绝。
             if body.gen != 0 {
                 if body.gen > self.gen {
                     self.gen = body.gen;
                     self.awaiting = None;
-                } else if body.gen == self.gen && self.awaiting.is_some() {
-                    if self.caller {
+                } else if body.gen == self.gen {
+                    if self.awaiting.is_some() && self.caller {
                         // 我是主叫：我的 offer 优先，忽略对方的
                         return (Vec::new(), false);
                     }
                     self.awaiting = None;
+                } else {
+                    // 低于本端当前代际：过时 offer，拒绝
+                    return (Vec::new(), false);
                 }
                 self.peer_gen = body.gen;
             }
@@ -909,6 +916,32 @@ mod tests {
         let mut idle = Call::new();
         let (_, accepted2) = idle.on_offer_ex(A, &offer("c9"), "m9", 200);
         assert!(accepted2);
+    }
+
+    /// glare 缝隙：本端连续两次重协商推进到 gen=2、还在等应答时，对端
+    /// gen=1 的重协商 offer 迟到到达。早先 `peer_gen < body.gen < self.gen`
+    /// 的中间值从守卫缝隙漏进去被采纳，双方 SDP 交叉错位且无超时兜底。
+    /// 低于本端当前代际的 restart offer 必须整体拒绝。
+    #[test]
+    fn restart_offer_below_local_gen_is_rejected() {
+        let mut a = Call::new();
+        a.on_offer(B, &offer("c1"), "m1", 100);
+        a.accept("v=0 ans", 101);
+        assert_eq!(a.state(), State::Active);
+
+        // 本端连续两次重协商：gen 0 → 1 → 2，还在等第二次的应答
+        a.make_restart_offer_actions("v=0 r1");
+        a.make_restart_offer_actions("v=0 r2");
+
+        // 对端 gen=1 的 offer 迟到：peer_gen=0、1 < self.gen=2 → 必须拒
+        let (acts, accepted) = a.on_offer_ex(B, &restart_offer_gen("c1", 1), "m9", 200);
+        assert!(acts.is_empty(), "中间代际的 offer 不该产生任何动作");
+        assert!(!accepted, "过时 offer 的 SDP 不能透出 UI");
+        assert_eq!(a.state(), State::Active, "通话状态不受影响");
+
+        // 对照：高于本端代际的让路路径照常工作
+        let (_, accepted2) = a.on_offer_ex(B, &restart_offer_gen("c1", 5), "m10", 210);
+        assert!(accepted2, "更高代际仍应被接受（让路）");
     }
 
     /// 中继重投同一条 offer（同 msg_id）：去重后必须报告未接受，

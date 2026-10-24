@@ -385,6 +385,23 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                     let _ = tx.send(ServerFrame::err("bad_version", format!("需要 v{PROTOCOL_VERSION}")));
                     continue;
                 }
+                // 建队列与投递共用同一速率窗口：每个 New 都会写一行 30 天 TTL 的
+                // 日志，不限速的话匿名中继上一个脚本就能把磁盘灌满（put 有
+                // 限制而 new 没有，等于只锁了前门）。
+                if rate_limit > 0 {
+                    if window_start.elapsed() >= Duration::from_secs(60) {
+                        window_start = std::time::Instant::now();
+                        puts_in_window = 0;
+                    }
+                    if puts_in_window >= rate_limit {
+                        let _ = tx.send(ServerFrame::err(
+                            "rate_limited",
+                            format!("超过速率限制（{rate_limit} 条/分钟），请稍后重试"),
+                        ));
+                        continue;
+                    }
+                    puts_in_window += 1;
+                }
                 let qid = proto::new_queue_id();
                 let exp = proto::now_secs() + QUEUE_TTL_SECS;
                 let mut st = state.lock().await;
@@ -912,6 +929,8 @@ mod tests {
     async fn rate_limit_blocks_flood() {
         let addr = start_test_server_with_rate(3).await;
         let mut c = connect(addr).await;
+        // New 也占一条额度（建队列同样写日志行，不做限速就是磁盘 DoS 向量），
+        // 所以本连接剩余额度 = 3 - 1 = 2 条 put。
         send(&mut c, &ClientFrame::New { v: PROTOCOL_VERSION }).await;
         let qid = match recv(&mut c).await {
             ServerFrame::NewOk { qid, .. } => qid,
@@ -919,6 +938,7 @@ mod tests {
         };
 
         let mut limited = 0;
+        let mut ok = 0;
         for i in 0..6 {
             send(
                 &mut c,
@@ -931,11 +951,12 @@ mod tests {
             .await;
             match recv(&mut c).await {
                 ServerFrame::Err { code, .. } if code == "rate_limited" => limited += 1,
-                ServerFrame::Ok { .. } => {}
+                ServerFrame::Ok { .. } => ok += 1,
                 other => panic!("意外帧: {other:?}"),
             }
         }
-        assert_eq!(limited, 3, "3 条额度用完后，后 3 条应被限流");
+        assert_eq!(ok, 2, "New 用掉 1 条后，剩余 2 条额度应放行 2 条 put");
+        assert_eq!(limited, 4, "额度用完后其余应被限流");
     }
 
     /// 超过 64KiB 的消息体必须拒绝（阶段 0 的上限，大文件走另一条通道）

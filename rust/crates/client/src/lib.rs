@@ -338,7 +338,13 @@ fn load_self(dir: &Path) -> Result<SelfState> {
 }
 
 fn save_self(dir: &Path, s: &SelfState) -> Result<()> {
-    std::fs::write(dir.join(SELF_FILE), serde_json::to_vec_pretty(s)?)?;
+    // tmp+rename：这两个文件有不持锁的读者（contacts()/self_queue/收消息路径），
+    // 直接覆盖写到一半被读到就是半个 JSON——UI 瞬间"联系人全没了"、通话发不起。
+    // 照抄 save_turn 的原子写法。
+    let p = dir.join(SELF_FILE);
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(s)?)?;
+    std::fs::rename(&tmp, &p)?;
     Ok(())
 }
 
@@ -351,7 +357,11 @@ fn load_contacts(dir: &Path) -> Result<Vec<Contact>> {
 }
 
 fn save_contacts(dir: &Path, c: &[Contact]) -> Result<()> {
-    std::fs::write(dir.join(CONTACTS_FILE), serde_json::to_vec_pretty(c)?)?;
+    // 同 save_self：读者无锁，必须原子替换
+    let p = dir.join(CONTACTS_FILE);
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(c)?)?;
+    std::fs::rename(&tmp, &p)?;
     Ok(())
 }
 
@@ -1121,14 +1131,25 @@ pub fn purge_queue(dir: &str) -> Result<u64> {
             .ok_or_else(|| anyhow!("还不知道连哪个中继"))?;
 
         let mut conn = Conn::connect(&relay).await?;
-        conn.sub(&qid).await?;
+        // 订阅瞬间推来的积压第一条同样盲 ack（sub 的注释说明为什么不能吞）：
+        // "不留痕"是这个函数的唯一目标，丢一条就等于留了一条。
         let mut acked: u64 = 0;
+        if let Some((mid, _)) = conn.sub(&qid).await? {
+            if conn.ack(&qid, &[mid]).await.is_ok() {
+                acked += 1;
+            }
+        }
         let mut idle: u32 = 0;
-        while idle < 3 {
+        // 总量上限：正常会话队列撑死几千条；持续有人投递时（例如对面正在
+        // 疯狂发消息）没有上限的话"紧急清除"会被无限拖住。
+        let mut guard: u32 = 0;
+        const PURGE_LIMIT: u32 = 20_000;
+        while idle < 3 && guard < PURGE_LIMIT {
             match conn.recv_msg(Duration::from_secs(2)).await {
                 Ok((mid, _body)) => {
                     // _body 整个丢弃：不解码、不进内存里的任何持久结构
                     idle = 0;
+                    guard += 1;
                     let ids = [mid];
                     if conn.ack(&qid, &ids).await.is_ok() {
                         acked += 1;
@@ -1136,9 +1157,18 @@ pub fn purge_queue(dir: &str) -> Result<u64> {
                 }
                 Err(RecvErr::Timeout) => {
                     idle += 1;
-                    // 保活探测，顺便确认连接没死（死连接上 ack 全是假的）
-                    if conn.probe().await.is_err() {
-                        break;
+                    // 保活探测，顺便确认连接没死（死连接上 ack 全是假的）。
+                    // 等 Pong 期间中继可能恰好推来数据——那也是要清除的消息，
+                    // 丢弃就违背了"不留痕"，必须 ack 掉。
+                    match conn.probe().await {
+                        Err(_) => break,
+                        Ok(Some((mid, _))) => {
+                            guard += 1;
+                            if conn.ack(&qid, &[mid]).await.is_ok() {
+                                acked += 1;
+                            }
+                        }
+                        Ok(None) => {}
                     }
                 }
                 Err(RecvErr::Fatal(_)) => break,
@@ -1351,7 +1381,7 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
         g.remove(&key)
     };
     let mut conn = match cached {
-        Some((q, r, c)) if q == qid && r == relay => c,
+        Some((q, r, c)) if q == qid && r == relay => (c, None),
         _ => {
             // 连不上就说清楚"是哪台、为什么不能自动换"，否则用户只会看到一句没头没脑的
             // "连接失败"，而真正要做的是在设置里迁移中继。
@@ -1360,35 +1390,56 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
                     "连不上你的中继 {relay}（收消息必须连这台，迁移中继会重建队列）: {e:#}"
                 )
             })?;
-            c.sub(&qid).await?;
-            c
+            let pending = c.sub(&qid).await?;
+            (c, pending)
         }
     };
-
-    let got = match conn.recv_msg(Duration::from_secs(timeout_secs)).await {
-        Ok(v) => Some(v),
-        Err(RecvErr::Timeout) => match conn.probe().await {
-            // 连接还活着：正常空闲超时
-            Ok(None) => None,
-            // 等心跳时恰好推来了数据：当作收到消息处理
-            Ok(Some(v)) => Some(v),
-            // 连接已死（半开）：不写回缓存，让下一轮重连
+    // 订阅瞬间推来的积压第一条：不能丢（见 sub 的注释）。放进本轮处理；
+    // 没有才走正常的"等一条消息或空闲超时"。
+    let got = match conn.1.take() {
+        Some(v) => Some(v),
+        None => match conn.0.recv_msg(Duration::from_secs(timeout_secs)).await {
+            Ok(v) => Some(v),
+            Err(RecvErr::Timeout) => match conn.0.probe().await {
+                // 连接还活着：正常空闲超时
+                Ok(None) => None,
+                // 等心跳时恰好推来了数据：当作收到消息处理
+                Ok(Some(v)) => Some(v),
+                // 连接已死（半开）：不写回缓存，让下一轮重连
+                Err(RecvErr::Fatal(e)) => {
+                    return Err(anyhow!("收消息超时且心跳探测失败（丢弃坏连接）: {e:#}"))
+                }
+                Err(RecvErr::Timeout) => {
+                    return Err(anyhow!("收消息超时且心跳也无响应（丢弃坏连接）"))
+                }
+            },
             Err(RecvErr::Fatal(e)) => {
-                return Err(anyhow!("收消息超时且心跳探测失败（丢弃坏连接）: {e:#}"))
-            }
-            Err(RecvErr::Timeout) => {
-                return Err(anyhow!("收消息超时且心跳也无响应（丢弃坏连接）"))
+                // 连接坏了：不写回缓存，下次重连
+                return Err(e);
             }
         },
-        Err(RecvErr::Fatal(e)) => {
-            // 连接坏了：不写回缓存，下次重连
-            return Err(e);
-        }
     };
+    let mut conn = conn.0;
 
     let incoming = match got {
         Some((mid, body)) => {
-            let wire = Wire::from_bytes(&body)?;
+            // 结构性坏帧（不是合法 Wire）按毒帧处理：ack 掉止住重投、连接回缓存。
+            // 之前直接 `?` 返回：不 ack、连接也丢弃——每轮重连都收到同一条坏帧、
+            // 再报错再丢连接，死循环，毒帧永远堵在队列前面（还拖慢每次重连）。
+            let wire = match Wire::from_bytes(&body) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn(format!(
+                        "信封不是合法的 Wire（已确认并从中继删除，来源未知）: {e:#}"
+                    ));
+                    ack_or_warn(&mut conn, &qid, &mid).await;
+                    cache()
+                        .lock()
+                        .expect("缓存锁中毒")
+                        .insert(key, (qid, relay, conn));
+                    return Ok(None);
+                }
+            };
             // 到这里才读设备：等待消息的这段时间里用户可能已经改了状态
             // （加联系人、发消息都会推进棘轮），读早了就会写回旧状态把它盖掉。
             let lock = dev_lock(dir);
@@ -1753,7 +1804,14 @@ impl Conn {
 
     async fn send(&mut self, f: &ClientFrame) -> Result<()> {
         let s = serde_json::to_string(f)?;
-        self.ws.send(Message::text(s)).await.context("发送失败")?;
+        // 必须有写超时：TCP 零窗口/半开路径上 `SinkExt::send` 会无限 pending，
+        // 而所有发送 API 都在设备锁内同步 block_on 到这里——锁被无限持有后，
+        // 收消息、加好友、切中继会全部卡死且无任何日志。超时按 Fatal 语义
+        // 处理（调用方丢弃连接，下一轮重连）。
+        tokio::time::timeout(Duration::from_secs(10), self.ws.send(Message::text(s)))
+            .await
+            .map_err(|_| anyhow!("发送超时（连接疑似半开，丢弃）"))?
+            .context("发送失败")?;
         Ok(())
     }
 
@@ -1802,13 +1860,18 @@ impl Conn {
         }
     }
 
-    async fn sub(&mut self, qid: &str) -> Result<()> {
+    /// 订阅。返回 `Some((id, body))` = 订阅确认前中继就推来了积压的第一条
+    /// （队列非空时真实会发生）——这条消息绝不能吞：早先只读一帧就返回，
+    /// Msg 帧被直接丢掉也不 ack，消息只能等下一次重连重投，若中继只在
+    /// 本连接内投递，它就永远出不来。调用方必须按正常消息处理它。
+    async fn sub(&mut self, qid: &str) -> Result<Option<(String, Vec<u8>)>> {
         self.send(&ClientFrame::Sub {
             qid: qid.to_string(),
         })
         .await?;
         match self.recv_frame(Duration::from_secs(10)).await {
-            Ok(ServerFrame::Ok { .. }) | Ok(ServerFrame::Msg { .. }) => Ok(()),
+            Ok(ServerFrame::Ok { .. }) => Ok(None),
+            Ok(ServerFrame::Msg { id, body, .. }) => Ok(Some((id, body))),
             Ok(ServerFrame::Err { code, msg }) => Err(anyhow!("订阅失败 [{code}] {msg}")),
             Ok(other) => Err(anyhow!("订阅收到意外帧: {other:?}")),
             Err(RecvErr::Timeout) => Err(anyhow!("订阅超时")),
