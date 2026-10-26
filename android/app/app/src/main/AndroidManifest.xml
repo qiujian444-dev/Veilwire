@@ -7,6 +7,10 @@
     <!-- 前台服务：类型必须与代码里 startForeground 传的常量一致 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <!-- 通话期间后台采集：Android 11+ 的 while-in-use 限制会在 Activity 不可见
+         且无对应类型 FGS 时把麦克风送达静音、相机停帧（通话切后台=单方面听不见） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
 
     <!-- Android 13+ 运行时申请，否则前台服务通知不显示 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -93,6 +97,11 @@
         <!-- Doze 逃生舱：进程被杀后由精确闹钟拉回（见 KeepaliveReceiver 注释） -->
         <receiver
             android:name=".KeepaliveReceiver"
+            android:exported="false" />
+
+        <!-- 来电通知上的接听/拒接按钮（CallStyle.forIncomingCall 需要） -->
+        <receiver
+            android:name=".CallActionReceiver"
             android:exported="false" />
 
     </application>

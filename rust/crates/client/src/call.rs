@@ -339,7 +339,12 @@ impl Call {
     ///
     /// 只有 Active 才允许：还没接通就重协商没有意义，会把状态机搞乱。
     pub fn make_restart_offer_actions(&mut self, sdp: &str) -> Vec<Action> {
-        if self.state != State::Active || sdp.len() > MAX_SDP_LEN {
+        // 状态与长度分开判：混在一个条件里的话，SDP 超长会被上层报成
+        // "当前不在通话中"——用户做对了操作却得到答非所问的错误（P3）。
+        if self.state != State::Active {
+            return Vec::new();
+        }
+        if sdp.len() > MAX_SDP_LEN {
             return Vec::new();
         }
         self.renegotiating = true;
@@ -559,21 +564,30 @@ impl Call {
 
     /// 收到 answer（主叫侧）
     pub fn on_answer(&mut self, from_dh: &str, body: &AnswerBody, now: u64) -> Vec<Action> {
-        // call_id 不匹配的一律忽略：可能是一通已经放弃的旧通话
+        self.on_answer_ex(from_dh, body, now).0
+    }
+
+    /// [on_answer] 的完整版：附带"这份 answer 是否被状态机接受"。
+    ///
+    /// 与 on_offer_ex 同一道理：被 call_id/代际/来源守卫丢弃的 answer，其 SDP
+    /// 不能透出 UI——UI 按契约 setRemoteDescription 会把本地 gen=2 的 offer
+    /// 配上远端 gen=1 的 answer，媒体通道错位（二轮审计 P2-1）。
+    pub fn on_answer_ex(&mut self, from_dh: &str, body: &AnswerBody, now: u64) -> (Vec<Action>, bool) {
+        // call_id 不匹配一律忽略：可能来自已经放弃的旧通话
         if body.call_id != self.call_id {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         // 两种合法情形：初次应答（Outgoing），或重协商应答（Active + renegotiating）
         let first_answer = self.state == State::Outgoing;
         let renegotiation_answer = self.state == State::Active && self.renegotiating;
         if !first_answer && !renegotiation_answer {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         if from_dh != self.peer_dh {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         if body.sdp.len() > MAX_SDP_LEN {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
         // 代际校验：只接受"对我方当前这个 offer"的应答。
@@ -586,7 +600,7 @@ impl Call {
         // 结果第一个用例就挂了——gen=0 的旧应答正好能穿过这道口子，
         // 代际防护等于没做。旧版对端的首次通话 gen 全是 0，仍然正常。
         if self.awaiting != Some(body.gen) {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
         self.awaiting = None;
@@ -594,7 +608,7 @@ impl Call {
         self.renegotiating = false;
         self.renegotiate_since = None;
         self.enter(State::Active, now);
-        vec![self.state_action()]
+        (vec![self.state_action()], true)
     }
 
     /// 收到远端 ICE。**不做状态检查**，只要 call_id 对就交给上层 →

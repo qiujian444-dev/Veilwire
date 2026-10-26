@@ -114,6 +114,22 @@ class MessagingService : Service() {
                 // 初始化放在这里，保证服务先起来时也不会漏掉第一通电话
                 CallManager.init(this)
                 startAsForeground()
+                // 通话状态翻转时升级/回落前台服务类型（microphone/camera），
+                // 否则 Android 11+ 在通话切后台时静音本端（见 upgradeForCall 注释）。
+                scope.launch {
+                    var lastVisible = false
+                    var lastVideo = false
+                    while (scope.isActive) {
+                        val v = CallManager.ui.visible
+                        val vid = CallManager.ui.video
+                        if (v != lastVisible || (v && vid != lastVideo)) {
+                            lastVisible = v
+                            lastVideo = vid
+                            runCatching { upgradeForCall(v, vid) }
+                        }
+                        delay(1_000)
+                    }
+                }
                 if (loopJob == null) {
                     running = true
                     isRunning = true
@@ -138,6 +154,43 @@ class MessagingService : Service() {
 
     private fun startAsForeground() {
         updateForegroundNoti(relayDown = false)
+    }
+
+    /**
+     * 通话期间把前台服务类型升级为 remoteMessaging|microphone|camera：
+     * Android 11+ 的 while-in-use 限制会在 Activity 不可见且服务无对应类型时
+     * 把麦克风送达静音、相机停帧——用户接通后切到别的 App，自己这边就变成
+     * "单方面听不见"，无任何提示（二轮审计 P2）。CallManager 的 ui 状态翻转
+     * 时由观察者调用来升级/回落。
+     */
+    fun upgradeForCall(inCall: Boolean, video: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // API 34 以下 startForeground 不带类型参数也不受 while-in-use 约束
+            updateForegroundNoti(relayDown = false)
+            return
+        }
+        val pi = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val text = if (inCall) getString(R.string.msg_svc_text_in_call)
+        else getString(R.string.msg_svc_text_ok)
+        val noti: Notification = Notification.Builder(this, ensureChannel())
+            .setContentTitle(getString(R.string.msg_svc_title))
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setOngoing(true)
+            .setContentIntent(pi)
+            .build()
+        val type = if (inCall) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                (if (video) ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0)
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+        }
+        runCatching { startForeground(NOTI_ID, noti, type) }
+            .onFailure { Log.w(TAG, "upgrade FGS type failed: ${it.message}") }
     }
 
     /**

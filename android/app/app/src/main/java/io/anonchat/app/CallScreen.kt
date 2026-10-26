@@ -239,7 +239,13 @@ private fun RemoteVideo() {
                 CallManager.bindRenderers(this, CallManager.localRenderer)
             }
         },
-        onRelease = { CallManager.bindRenderers(null, CallManager.localRenderer) }
+        onRelease = { r ->
+            // 先摘 sink 再 release：SurfaceViewRenderer 持有 native EGL surface，
+            // detach 不等于释放——早先从不调用 release，每通视频通话泄漏一个
+            // （二轮审计 P2）。
+            CallManager.bindRenderers(null, CallManager.localRenderer)
+            runCatching { r.release() }
+        }
     )
 }
 
@@ -261,7 +267,10 @@ private fun LocalVideo() {
                     CallManager.bindRenderers(CallManager.remoteRenderer, this)
                 }
             },
-            onRelease = { CallManager.bindRenderers(CallManager.remoteRenderer, null) }
+            onRelease = { r ->
+                CallManager.bindRenderers(CallManager.remoteRenderer, null)
+                runCatching { r.release() }
+            }
         )
     }
 }

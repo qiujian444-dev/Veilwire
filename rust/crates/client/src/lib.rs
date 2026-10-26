@@ -1670,6 +1670,14 @@ pub fn call_start(dir: &str, to: &str, video: bool) -> Result<String> {
 
 /// 主叫：本地 SDP 就绪后，把 offer 发出去
 pub fn call_set_offer(dir: &str, sdp: &str) -> Result<CallEvent> {
+    if sdp.len() > call::MAX_SDP_LEN {
+        // 超长与"状态不对"是两回事，报错必须能让用户/日志分清（P3）
+        return Err(anyhow!(
+            "SDP 过大（{} 字节，上限 {}），视频 m-line 过多时可能触发",
+            sdp.len(),
+            call::MAX_SDP_LEN
+        ));
+    }
     let acts = with_call(dir, |s| s.make_offer_actions(sdp));
     if acts.is_empty() {
         return Err(anyhow!("当前不在主叫状态，无法发送 offer"));
@@ -1682,6 +1690,13 @@ pub fn call_set_offer(dir: &str, sdp: &str) -> Result<CallEvent> {
 /// 上层要用 `IceRestart=true` 重新 createOffer，再把本地 SDP 传进来。
 /// 这里只负责把带 `restart` 标志的 offer 发出去并置标记——**通话状态不变**。
 pub fn call_renegotiate(dir: &str, sdp: &str) -> Result<CallEvent> {
+    if sdp.len() > call::MAX_SDP_LEN {
+        return Err(anyhow!(
+            "SDP 过大（{} 字节，上限 {}）",
+            sdp.len(),
+            call::MAX_SDP_LEN
+        ));
+    }
     let acts = with_call(dir, |s| s.make_restart_offer_actions(sdp));
     if acts.is_empty() {
         return Err(anyhow!("当前不在通话中，无法重新协商"));
@@ -1691,6 +1706,13 @@ pub fn call_renegotiate(dir: &str, sdp: &str) -> Result<CallEvent> {
 
 /// 被叫：接听。上层需先 setRemoteDescription(offer) 再 createAnswer，然后把 SDP 传进来。
 pub fn call_accept(dir: &str, sdp: &str) -> Result<CallEvent> {
+    if sdp.len() > call::MAX_SDP_LEN {
+        return Err(anyhow!(
+            "SDP 过大（{} 字节，上限 {}）",
+            sdp.len(),
+            call::MAX_SDP_LEN
+        ));
+    }
     let acts = with_call(dir, |s| s.accept(sdp, now()));
     if acts.is_empty() {
         return Err(anyhow!("当前没有可接听的通话"));
@@ -1701,25 +1723,44 @@ pub fn call_accept(dir: &str, sdp: &str) -> Result<CallEvent> {
 /// 被叫：拒接
 pub fn call_reject(dir: &str, reason: &str) -> Result<CallEvent> {
     let acts = with_call(dir, |s| s.reject(reason, now()));
-    flush_actions(dir, acts).map_err(|e| anyhow!(e))
+    flush_actions(dir, acts).map(normalize_event(dir)).map_err(|e| anyhow!(e))
 }
 
 /// 本端挂断
 pub fn call_hangup(dir: &str, reason: &str) -> Result<CallEvent> {
     let acts = with_call(dir, |s| s.hangup(reason, now()));
-    flush_actions(dir, acts).map_err(|e| anyhow!(e))
+    flush_actions(dir, acts).map(normalize_event(dir)).map_err(|e| anyhow!(e))
 }
 
 /// 本端产生了一个 ICE candidate，要发给对方
 pub fn call_ice(dir: &str, candidate: &str, mid: &str, mline: i32) -> Result<CallEvent> {
     let acts = with_call(dir, |s| s.candidate_action(candidate, mid, mline));
-    flush_actions(dir, acts).map_err(|e| anyhow!(e))
+    flush_actions(dir, acts).map(normalize_event(dir)).map_err(|e| anyhow!(e))
 }
 
 /// 定时驱动（振铃超时）。上层每秒调一次。
 pub fn call_tick(dir: &str) -> Result<CallEvent> {
     let acts = with_call(dir, |s| s.tick(now()));
-    flush_actions(dir, acts).map_err(|e| anyhow!(e))
+    flush_actions(dir, acts).map(normalize_event(dir)).map_err(|e| anyhow!(e))
+}
+
+/// 没有状态动作时用当前状态兜底（与 call_inbound 的处理一致）。
+///
+/// 早先这些直连 API 在"无事发生"时返回 `state:""` 的事件，上层按 state
+/// 字符串分发会落到未知分支（P3）。
+fn normalize_event(dir: &str) -> impl Fn(CallEvent) -> CallEvent + '_ {
+    move |mut ev| {
+        if ev.state.is_empty() {
+            let cur = call_state(dir);
+            ev.state = cur.state;
+            ev.call_id = cur.call_id;
+            ev.peer_dh = cur.peer_dh;
+            ev.video = cur.video;
+            ev.reason = cur.reason;
+            ev.renegotiating = cur.renegotiating;
+        }
+        ev
+    }
 }
 
 /// 结束态回到空闲（UI 关掉通话界面时调）
@@ -1758,8 +1799,14 @@ pub fn call_inbound(
         call_kind::ANSWER => {
             let b: call::AnswerBody = serde_json::from_str(body)
                 .map_err(|e| anyhow!("answer 格式不对：{e}"))?;
-            extra.remote_sdp = Some(b.sdp.clone());
-            with_call(dir, |s| s.on_answer(from_dh, &b, t))
+            // 与 offer 分支对称：只有被状态机接受的 answer 才把 SDP 透出给 UI。
+            // 被代际/来源守卫丢弃的 answer 透出去，UI setRemoteDescription 会把
+            // 本地新 offer 配上远端旧 answer，媒体通道错位（二轮审计 P2-1）。
+            let (acts, accepted) = with_call(dir, |s| s.on_answer_ex(from_dh, &b, t));
+            if accepted {
+                extra.remote_sdp = Some(b.sdp.clone());
+            }
+            acts
         }
         call_kind::REJECT | call_kind::END => {
             let b: call::EndBody = serde_json::from_str(body)

@@ -423,6 +423,7 @@
     <string name="msg_svc_channel_desc">Keeps the connection alive to receive messages</string>
     <string name="msg_svc_title">Receiving messages</string>
     <string name="msg_svc_text_ok">Connection established</string>
+    <string name="msg_svc_text_in_call">In call</string>
     <string name="msg_svc_text_battery">Allow the battery optimisation exemption, or the connection drops when the screen is off</string>
     <string name="msg_svc_text_relay_down">Not receiving messages: the relay is unreachable. You can switch to another relay in Settings</string>
     <string name="msg_channel">New messages</string>

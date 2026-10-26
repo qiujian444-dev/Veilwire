@@ -1,6 +1,7 @@
 package io.anonchat.app
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import io.anonchat.core.Native
@@ -334,6 +335,7 @@ object Repo {
             // 旧日志里 `w` 是名字，靠联系人表 + 陌生人来信卡片（都带 dh）反查。
             // 找不到映射的（比如对方卡片也没了）保留原名，不丢数据。
             runCatching { migrateConversationKeys() }
+            Thread { runCatching { sweepOrphanParts() } }.start()
             Thread { runCatching { store.compactIfNeeded() } }.start()
             // 启动清扫：被杀期间到期的焚毁消息，回来第一件事就是删掉
             Thread { runCatching { sweepExpired() } }.start()
@@ -464,10 +466,17 @@ object Repo {
     fun forward(to: String, msgs: List<Msg>): Res<Pair<Int, Int>> {
         var ok = 0
         var skip = 0
+        // 记住第一个真实失败：全失败时报它，而不是一律"文件副本不在本机"。
+        // 纯文本因中继断连失败时，那个错误码会误导用户去查文件（P3）。
+        var firstErr: String? = null
         for (m in msgs) {
             when {
                 m.kind == "text" -> {
-                    if (send(to, m.text).ok) ok++ else skip++
+                    val r = send(to, m.text)
+                    if (r.ok) ok++ else {
+                        skip++
+                        if (firstErr == null) firstErr = r.error
+                    }
                 }
                 m.kind in setOf("file", "voice", "image", "video") -> {
                     val v = runCatching { JSONObject(m.text) }.getOrNull()
@@ -487,7 +496,10 @@ object Repo {
                         width = v?.optInt("w", 0) ?: 0,
                         height = v?.optInt("h", 0) ?: 0,
                     )
-                    if (r.ok) ok++ else skip++
+                    if (r.ok) ok++ else {
+                        skip++
+                        if (firstErr == null) firstErr = r.error
+                    }
                 }
                 // 通话记录、撤回灰字没有转发意义
                 else -> skip++
@@ -495,7 +507,12 @@ object Repo {
         }
         return Res(
             ok to skip,
-            err = if (ok == 0) AppError(ErrKind.FORWARD_NO_FILE) else null
+            err = when {
+                ok > 0 -> null
+                // 有真实发送错误就透传（网络/中继问题），否则才是"没有可转发的文件"
+                firstErr != null -> AppError(ErrKind.CORE_FAILURE, firstErr)
+                else -> AppError(ErrKind.FORWARD_NO_FILE)
+            }
         )
     }
 
@@ -790,7 +807,46 @@ object Repo {
             store.deleteById(k, m.id)
             deleteBlobFiles(m)
         }
+        if (who == null) sweepStaleFileRx()
         return targets.size
+    }
+
+    /**
+     * 清理死亡的在途传输：超过 [FILE_RX_TIMEOUT_MS] 没有新块到达的条目
+     * 连同 .part 文件一起删。fileRx 是纯内存表、无断点续传——收一半进程
+     * 被杀后重启用 BitSet 归零的空表接续，got 永远到不了 total，进度行会
+     * 永久卡在半途（二轮审计 P2）。把死传输变成干净的失败。
+     * 挂在 sweepExpired 的调用节奏上（收消息循环每轮/聊天页每秒），无需独立线程。
+     */
+    private fun sweepStaleFileRx() {
+        val now = SystemClock.elapsedRealtime()
+        val dead = synchronized(msgLock) {
+            val it = fileRx.entries.iterator()
+            val out = mutableListOf<RxState>()
+            while (it.hasNext()) {
+                val e = it.next()
+                if (now - e.value.first.lastChunkAt > FILE_RX_TIMEOUT_MS) {
+                    out.add(e.value.first)
+                    it.remove()
+                }
+            }
+            out
+        }
+        if (dead.isNotEmpty()) {
+            dead.forEach { runCatching { it.raf?.close() } }
+            dead.forEach { runCatching { it.tmp.delete() } }
+            bumpFileRx()
+            android.util.Log.w("AnonChat", "file transfer ${dead.joinToString { it.fid }} timed out, cleaned")
+        }
+    }
+
+    /** 启动清扫：inbox 下残留的 .part 半成品（进程被杀留下的）直接删 */
+    private fun sweepOrphanParts() {
+        runCatching {
+            val dir = File(deviceDir.parentFile, "inbox")
+            dir.listFiles { f -> f.name.startsWith(".") && f.name.endsWith(".part") }
+                ?.forEach { it.delete() }
+        }
     }
 
     // -------------------------------------------------------------- 文件传输
@@ -866,7 +922,12 @@ object Repo {
         val have = java.util.BitSet(total)
         var got = 0
         var raf: java.io.RandomAccessFile? = null
+        /** 最后一块到达的时刻（uptimeMs）。超时清理用它判定传输已死 */
+        var lastChunkAt: Long = SystemClock.elapsedRealtime()
     }
+
+    /** 在途传输超时：超过此时长没有新块到达，判定死亡并清理（无断点续传设计下的干净失败） */
+    private val FILE_RX_TIMEOUT_MS = 5 * 60 * 1000L
 
     /** 接收进度表：fid → 状态 + 给 UI 的快照。UI 观察 fileRxTick 实时刷新 */
     private val fileRx = linkedMapOf<String, Pair<RxState, FileRx>>()
@@ -1052,6 +1113,9 @@ object Repo {
             android.util.Base64.decode(v.optString("data"), android.util.Base64.NO_WRAP)
         }.getOrNull() ?: return
         if (fid.isBlank() || total <= 0 || idx !in 0 until total) return
+        // 空块不能算"已收"：Base64.decode("") 返回空数组而非 null，写上不报错，
+        // 仍会 have.set+got++——损坏/伪造的末块能让文件"收齐"但内容有渣洞（P3）。
+        if (data.isEmpty() && size > 0) return
         if (size > FILE_MAX_BYTES) {
             android.util.Log.w("AnonChat", "oversized file rejected $name ($size bytes)")
             return
@@ -1074,6 +1138,7 @@ object Repo {
                     raf.write(data)
                     st.have.set(idx)
                     st.got++
+                    st.lastChunkAt = SystemClock.elapsedRealtime()
                 }.onFailure { t ->
                     android.util.Log.w("AnonChat", "write file chunk failed ${t.message}")
                 }

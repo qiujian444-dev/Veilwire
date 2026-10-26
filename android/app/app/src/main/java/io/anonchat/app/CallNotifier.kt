@@ -73,14 +73,25 @@ object CallNotifier {
             .setContentIntent(pi)
             .setFullScreenIntent(pi, true)
 
-        // CallStyle 需要 Person + 通话态。forOngoingCall 会显示计时；
-        // 来电（振铃）阶段系统自动按来电样式呈现（横幅 + pill 按钮）。
+        // CallStyle 需要 Person + 通话态。振铃用 forIncomingCall（系统给出
+        // "接听/拒接" 两个动作按钮）；早先振铃也用了 forOngoingCall，pill 只有
+        // 挂断、通知上没有接听入口，用户只能点进 App（P3）。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val person = android.app.Person.Builder()
                 .setName(who)
                 .setImportant(true)
                 .build()
-            builder.setStyle(Notification.CallStyle.forOngoingCall(person, pi))
+            val decline = PendingIntent.getBroadcast(
+                ctx, 2,
+                Intent(ctx, CallActionReceiver::class.java).setAction(CallActionReceiver.ACTION_DECLINE),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val answer = PendingIntent.getBroadcast(
+                ctx, 3,
+                Intent(ctx, CallActionReceiver::class.java).setAction(CallActionReceiver.ACTION_ANSWER),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.setStyle(Notification.CallStyle.forIncomingCall(person, decline, answer))
         }
 
         runCatching { nm.notify(NOTI_ID, builder.build()) }

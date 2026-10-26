@@ -21,7 +21,7 @@
 | Android 客户端 | Kotlin + Compose | `android/app/` | UI、通知、WebRTC、相册/相机、前台服务 |
 | 中继 | Rust（同一个 workspace） | `rust/crates/relay/` | 无标识队列 + 内嵌 TURN + DHT 自公布 |
 
-**当前版本**：`0.15.9` / `versionCode 36`（见 `android/app/app/build.gradle.kts`）
+**当前版本**：`0.15.10` / `versionCode 37`（见 `android/app/app/build.gradle.kts`）
 **协议版本**：`proto::PROTOCOL_VERSION`，改帧结构必须同时考虑旧客户端兼容性。
 
 ---

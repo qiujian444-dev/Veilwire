@@ -423,6 +423,7 @@
     <string name="msg_svc_channel_desc">保持连接以接收消息</string>
     <string name="msg_svc_title">正在接收消息</string>
     <string name="msg_svc_text_ok">长连接已建立</string>
+    <string name="msg_svc_text_in_call">通话中</string>
     <string name="msg_svc_text_battery">建议授予电池白名单，否则息屏后会断</string>
     <string name="msg_svc_text_relay_down">收不到消息：中继连不上。可在设置中更换中继地址</string>
     <string name="msg_channel">新消息</string>
