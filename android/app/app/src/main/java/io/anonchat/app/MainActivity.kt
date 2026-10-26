@@ -134,6 +134,8 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_OPEN_PEER = "open_peer"
         /** 通知点击带来的待打开会话键（onNewIntent 与冷启动都可能写入） */
         var pendingOpenPeer: String? = null
+        /** 通知栏"接听"拉起的标记：补完权限再真正接听 */
+        const val EXTRA_ANSWER_CALL = "answer_call"
         /** 调试用：跑 WebRTC 自检，只打日志 */
         const val EXTRA_SELFTEST = "selftest"
 
@@ -151,6 +153,8 @@ class MainActivity : ComponentActivity() {
 
     /** 待发起通话：权限拿到之后再真正开始 */
     private var pendingCall: Pair<String, Boolean>? = null
+    /** 待接听：权限拿到之后再真正接听（通知栏接听走这条路） */
+    private var pendingAnswer = false
 
     private val callPerm = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -162,6 +166,30 @@ class MainActivity : ComponentActivity() {
         } else {
             Log.w("AnonChat", "call permission denied")
         }
+    }
+
+    /** 接听前的权限补齐。CallManager 只有 application context，弹不出系统弹窗。 */
+    private val answerPerm = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { res ->
+        if (!pendingAnswer) return@registerForActivityResult
+        pendingAnswer = false
+        if (res.values.all { it }) {
+            CallManager.accept()
+        } else {
+            Log.w("AnonChat", "answer permission denied")
+        }
+    }
+
+    /** 接听（含权限补齐）。UI 的接听按钮与通知栏的接听按钮都走这里。 */
+    private fun requestAnswerPermissions() {
+        val missing = CallManager.missingCallPermissions()
+        if (missing.isEmpty()) {
+            CallManager.accept()
+            return
+        }
+        pendingAnswer = true
+        answerPerm.launch(missing.toTypedArray())
     }
 
     private fun startCall(peer: String, video: Boolean) {
@@ -188,8 +216,13 @@ class MainActivity : ComponentActivity() {
         if (intent?.getBooleanExtra(EXTRA_SHOW_CALL, false) == true) {
             Log.i("AnonChat", "launched from incoming call notification")
         }
-        // 消息通知点击：记住目标会话，Root 组装后消费（onNewIntent 同样处理）
+        // 消息通知点击：记住目标会话，Root 组装后消费
         intent?.getStringExtra(EXTRA_OPEN_PEER)?.let { pendingOpenPeer = it }
+        // 通知栏接听：等界面 ready 再弹权限（onCreate 阶段 launch 权限协约不安全）
+        if (intent?.getBooleanExtra(EXTRA_ANSWER_CALL, false) == true) {
+            intent.removeExtra(EXTRA_ANSWER_CALL)
+            window.decorView.post { requestAnswerPermissions() }
+        }
         if (intent?.getBooleanExtra(EXTRA_SELFTEST, false) == true) {
             WebRtcSelfTest.run(this)
         }
@@ -213,7 +246,10 @@ class MainActivity : ComponentActivity() {
                                 onStartCall = { peer, video -> startCall(peer, video) },
                             )
                             // 通话界面盖在最上层：它可能在聊天页、也可能在后台被通知拉起
-                            CallScreen(onClose = {})
+                            CallScreen(
+                                onClose = {},
+                                onAnswer = { requestAnswerPermissions() },
+                            )
                         }
                     }
                 }
@@ -232,8 +268,23 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resumed = true
-        // App 已在后台、通知再点进来走 onNewIntent：这里补一次消费
+        // App 已在后台、通知再点进来：这里补一次消费
         intent?.getStringExtra(EXTRA_OPEN_PEER)?.let { pendingOpenPeer = it }
+    }
+
+    /**
+     * App 已在前台时点通知不会走 onCreate/onResume，只会走这里。
+     * 之前完全没有覆写：前台来电的横幅点"接听"是没反应的（消息通知同理，
+     * 只是前台时本就不发消息通知，所以没暴露出来）。
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra(EXTRA_OPEN_PEER)?.let { pendingOpenPeer = it }
+        if (intent.getBooleanExtra(EXTRA_ANSWER_CALL, false)) {
+            intent.removeExtra(EXTRA_ANSWER_CALL)
+            window.decorView.post { requestAnswerPermissions() }
+        }
     }
 
     override fun onPause() {
@@ -3228,7 +3279,7 @@ private fun SafetyDialog(peer: String, verifiedNow: Boolean, onClose: (Boolean) 
 
     AlertDialog(
         onDismissRequest = { onClose(verified) },
-        title = { Text(stringResource(R.string.safety_title, peer)) },
+        title = { Text(stringResource(R.string.safety_title, Repo.displayName(peer))) },
         text = {
             Column {
                 Text(

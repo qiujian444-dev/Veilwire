@@ -413,8 +413,9 @@ object CallManager {
 
     // ------------------------------------------------------------ 主叫
 
-    /** 发起通话。调用前必须已拿到麦克风（视频还要相机）权限。 */
-    fun startCall(peerName: String, video: Boolean): String? {
+    /** 发起通话。调用前必须已拿到麦克风（视频还要相机）权限。
+     *  [peerDh] 是会话键（dh），不是显示名——界面名在下面单独解析。 */
+    fun startCall(peerDh: String, video: Boolean): String? {
         // 返回值只进 logcat（调用方 Log.w），技术信息，不本地化
         val ctx = appCtx ?: return "not initialized"
         // 通话中不允许再拨：早先 resetPeer 排在 callStart 之前，通话中重复
@@ -423,7 +424,7 @@ object CallManager {
         if (ui.visible) return "call in progress"
         resetPeer()
 
-        val (callId, err) = Repo.callStart(peerName, video)
+        val (callId, err) = Repo.callStart(peerDh, video)
         if (callId == null) return err ?: "start failed"
 
         val pc = newPeerConnection()
@@ -441,9 +442,14 @@ object CallManager {
 
         loggedEnd = false
         connectedAt = 0
-        // peerName 形参实际传的是会话键（dh，见 MainActivity.startCall），
-        // peerDh 一并填上：endCall 写通话记录要用它当会话键。
-        ui = UiState(state = "outgoing", peerName = peerName, peerDh = peerName, video = video)
+        // 会话键（dh）与显示名是两回事：早先这里把 dh 直接填进 peerName，
+        // 主叫侧通话界面就显示成一串 43 位公钥。
+        ui = UiState(
+            state = "outgoing",
+            peerName = Repo.displayName(peerDh),
+            peerDh = peerDh,
+            video = video,
+        )
         startTicker()
 
         val gen = mediaGen
@@ -491,8 +497,7 @@ object CallManager {
                 connectedAt = 0
                 ui = UiState(
                     state = "incoming",
-                    peerName = Repo.nameOfDh(ev.peerDh)
-                        ?: (Repo.STRANGER_PREFIX + ev.peerDh.take(8)),
+                    peerName = Repo.displayName(ev.peerDh),
                     peerDh = ev.peerDh,
                     video = ev.video,
                 )
@@ -594,21 +599,30 @@ object CallManager {
         )
     }
 
-    /** 用户点了接听 */
-    fun accept() {
-        val c = pc ?: return
-        val gen = mediaGen
-        // 被叫也要查权限：主叫路径有 MainActivity.startCall 查，被叫（尤其
-        // 从 FSI 全屏接听进来）从来没查过——没授麦克风时接通后"对方听不见我"，
-        // 用户无从知道是权限问题（二轮审计 P2-4）。缺失时给出明确错误并留在
-        // 来电态（对面会超时，用户可去系统设置授权后重拨）。
-        val ctx = appCtx ?: return
-        val missing = buildList {
+    /**
+     * 接听所需但尚未授予的运行时权限。空表 = 齐了。
+     *
+     * 单独抽出来是给 MainActivity 用的：申请权限必须有 Activity，
+     * CallManager 只有 application context，自己弹不出系统弹窗。
+     */
+    fun missingCallPermissions(): List<String> {
+        val ctx = appCtx ?: return emptyList()
+        return buildList {
             add(Manifest.permission.RECORD_AUDIO)
             if (ui.video) add(Manifest.permission.CAMERA)
         }.filter {
             ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
         }
+    }
+
+    /** 用户点了接听 */
+    fun accept() {
+        val c = pc ?: return
+        val gen = mediaGen
+        // 兜底：正常路径（主界面/通知）已经在接听前把权限要到了，
+        // 这里只剩异常路径（比如 Activity 已被销毁）。缺权限时留在来电态
+        // 并给出明确报错，对面会超时；用户授权后可重拨。
+        val missing = missingCallPermissions()
         if (missing.isNotEmpty()) {
             Log.w(TAG, "accept without permissions: $missing")
             ui = ui.copy(err = AppError(ErrKind.CALL_MIC_FAILED))

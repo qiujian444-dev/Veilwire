@@ -93,11 +93,16 @@ echo
 echo "==> 完成（按 ABI 拆分的产物）"
 ls -lh "$ROOT/android/app/app/build/outputs/apk/"*/ 2>/dev/null | grep -E "apk|:" || true
 
-# 把 arm64 那份单独复制出来：绝大多数真机装这个就够了
+# 按 ABI 各复制一份到 dist。arm64 给真机，x86_64 给模拟器——
+# 之前只复制 arm64，dist 里的 x86_64 长期是旧包，模拟器上 `install -r`
+# 会报 VERSION_DOWNGRADE / 签名不符，很容易误判成构建或签名出了问题。
 SUB="debug"; [ "$MODE" = "release" ] && SUB="release"
-SRC="$ROOT/android/app/app/build/outputs/apk/$SUB/app-arm64-v8a-$SUB.apk"
-if [ -f "$SRC" ]; then
-  mkdir -p "$ROOT/dist"
-  cp "$SRC" "$ROOT/dist/anonchat-arm64-$SUB.apk"
-  echo "    -> dist/anonchat-arm64-$SUB.apk ($(ls -lh "$ROOT/dist/anonchat-arm64-$SUB.apk" | awk '{print $5}'))"
-fi
+mkdir -p "$ROOT/dist"
+for pair in "arm64-v8a:arm64" "x86_64:x86_64"; do
+  SRC="$ROOT/android/app/app/build/outputs/apk/$SUB/app-${pair%%:*}-$SUB.apk"
+  DST="$ROOT/dist/anonchat-${pair##*:}-$SUB.apk"
+  if [ -f "$SRC" ]; then
+    cp "$SRC" "$DST"
+    echo "    -> dist/$(basename "$DST") ($(ls -lh "$DST" | awk '{print $5}'))"
+  fi
+done

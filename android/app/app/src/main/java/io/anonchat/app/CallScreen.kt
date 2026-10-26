@@ -2,6 +2,8 @@ package io.anonchat.app
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -46,8 +49,12 @@ import kotlinx.coroutines.delay
  * 覆盖在主页之上，不做导航跳转——因为通话可能在任何界面（甚至 App 在后台被通知拉起）发生，
  * 走导航栈会在返回时出现"退回哪个页面"的问题。
  */
+/**
+ * @param onAnswer 接听入口。必须是 Activity 侧的实现——接听前要补麦克风/相机
+ *   运行时权限，CallManager 自己弹不出系统弹窗。
+ */
 @Composable
-fun CallScreen(onClose: () -> Unit) {
+fun CallScreen(onClose: () -> Unit, onAnswer: () -> Unit = { CallManager.accept() }) {
     val ui = CallManager.ui
     if (!ui.visible) return
 
@@ -64,10 +71,29 @@ fun CallScreen(onClose: () -> Unit) {
         }
     }
 
+    // 通话页出现时收起键盘：从聊天页拨出时常驻键盘会把通话按钮挤到屏幕上半截，
+    // 而且键盘本身对通话毫无用处
+    val kb = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) { kb?.hide() }
+
     Box(
         Modifier
             .fillMaxSize()
             .background(Color(0xFF101418))
+            // 通话页是盖在主页上的覆盖层：必须吃掉落在空白处的触摸。
+            // Compose 的点击命中是自顶向下、未消费则继续传给下层兄弟节点，
+            // 所以不加这一层时，通话中点到"聊天输入框"的位置会直接把键盘弹起来，
+            // 运气不好还会误触下层的消息/菜单（实测于双模拟器）。
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false).consume()
+                    // 跟住整段手势，滑动也不要漏到下面去
+                    do {
+                        val ev = awaitPointerEvent()
+                        ev.changes.forEach { it.consume() }
+                    } while (ev.changes.any { it.pressed })
+                }
+            }
     ) {
         // 视频通话时铺满远端画面
         if (ui.video) {
@@ -128,7 +154,7 @@ fun CallScreen(onClose: () -> Unit) {
                 when (ui.state) {
                     "incoming" -> Row(horizontalArrangement = Arrangement.spacedBy(32.dp)) {
                         RoundButton(stringResource(R.string.call_reject), Color(0xFFE53935)) { CallManager.reject(); onClose() }
-                        RoundButton(stringResource(R.string.call_accept), Color(0xFF2E7D32)) { CallManager.accept() }
+                        RoundButton(stringResource(R.string.call_accept), Color(0xFF2E7D32)) { onAnswer() }
                     }
 
                     "outgoing" -> Row(horizontalArrangement = Arrangement.spacedBy(32.dp)) {

@@ -68,11 +68,14 @@
             关键：remoteMessaging。
             绝对不要改成 dataSync —— Android 15 起该类型 24 小时内累计只能跑 6 小时，
             超时抛 RemoteServiceException 直接崩溃。
+            microphone / camera 必须在这里一起声明：通话期间 setForegroundServiceType
+            只能做已声明类型的子集，否则抛 IllegalStateException、类型升级静默失败，
+            后台通话就失去了 while-in-use 权限豁免。
         -->
         <service
             android:name=".MessagingService"
             android:exported="false"
-            android:foregroundServiceType="remoteMessaging" />
+            android:foregroundServiceType="remoteMessaging|microphone|camera" />
 
         <!-- 已接收文件的开箱通道：气泡点按 → FileProvider URI → 系统查看器 -->
         <provider

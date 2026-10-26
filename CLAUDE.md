@@ -21,7 +21,7 @@
 | Android 客户端 | Kotlin + Compose | `android/app/` | UI、通知、WebRTC、相册/相机、前台服务 |
 | 中继 | Rust（同一个 workspace） | `rust/crates/relay/` | 无标识队列 + 内嵌 TURN + DHT 自公布 |
 
-**当前版本**：`0.15.11` / `versionCode 38`（见 `android/app/app/build.gradle.kts`）
+**当前版本**：`0.15.12` / `versionCode 39`（见 `android/app/app/build.gradle.kts`）
 **协议版本**：`proto::PROTOCOL_VERSION`，改帧结构必须同时考虑旧客户端兼容性。
 
 ---
@@ -152,6 +152,30 @@ restart offer 一律拒**（`peer_gen < gen < self.gen` 的中间值曾从守卫
 被采纳，双方 SDP 交叉错位且无法自愈——审计 P2-3）。
 **别给 `gen == 0` 开"兼容旧版"的后门**——那正好放过要丢的过期信令。
 
+### 4.5.1 通话界面的三条硬约定
+
+1. **会话键 ≠ 显示名**。`CallManager.startCall(peerDh, …)` 收的是 dh，
+   界面名一律 `Repo.displayName(dh)`。把 dh 直接塞进 `peerName` 会让主叫侧
+   通话页/安全码标题显示成一串 43 位公钥（0.15.11 实测）。
+2. **覆盖层必须吃掉触摸**。`CallScreen` 只盖在 `Root` 之上，Compose 的点击
+   命中是自顶向下、未被消费就继续传给下层兄弟节点。根 `Box` 不加
+   `pointerInput` 屏障时，通话中点到"聊天输入框"的位置会直接把键盘弹起来，
+   更糟的是可能误触下层菜单（实测于双模拟器，0.15.12 修）。
+3. **接听前必须补运行时权限**。麦克风/相机是运行时权限，CallManager 只有
+   application context，弹不出系统弹窗——`accept()` 里检测到缺失只能退回来电态。
+   所以接听统一走 `MainActivity.requestAnswerPermissions()`：UI 的接听按钮直接调，
+   通知栏的接听按钮经 `CallActionReceiver` → `EXTRA_ANSWER_CALL` 拉起主界面再调。
+   （0.15.11 及以前通知栏接听在未授权时是"点了没反应"，审计只做了检测没做申请。）
+
+### 4.5.2 前台服务类型必须全部声明
+
+`MessagingService` 的 `android:foregroundServiceType` 要写
+`remoteMessaging|microphone|camera`。`setForegroundServiceType` 只能做**已声明类型的
+子集**，少写一个就抛 `IllegalStateException`、类型升级静默失败；随之而来的是
+通话期间 `microphone` 类型被拒（`FOREGROUND_SERVICE_MICROPHONE` +
+`RECORD_AUDIO` 缺一不可），后台通话失去 while-in-use 豁免。日志里表现为
+`upgrade FGS type failed: ... is not a subset of ...`。
+
 ### 4.6 信令的 API 边界：只透出"被接受"的 SDP
 
 `call_inbound` 组装 CallEvent 时，**offer 的 remote_sdp/video 只能在状态机
@@ -205,7 +229,7 @@ restart offer 一律拒**（`peer_gen < gen < self.gen` 的中间值曾从守卫
 | 改阅后即焚 UI | 倒计时角标统一走 `BurnBadge`（`MainActivity.kt`，五种气泡共用）；到期清理的 UI 刷新**不要依赖 `sweepExpired` 返回值**（服务层全局清扫会抢先删掉，返回 0），用存储快照对比触发 `localBump++` |
 | 加一个协议帧 | 改 `proto` 的 `ClientFrame`/`ServerFrame` → 中继处理 → client 调用 → **考虑旧客户端能不能解析**（serde 遇到未知 tag 直接失败） |
 | 改发送/路由 | 先读 4.2，改完跑 `relay_failover` / `cross_relay_routing` / `reply_clue` |
-| 改通话 | 改 `call.rs` 状态机要同步加单测；UI 侧看 `CallManager` 的 `ui` 状态 |
+| 改通话 | 改 `call.rs` 状态机要同步加单测；UI 侧看 `CallManager` 的 `ui` 状态；改完必读 4.5.1 / 4.5.2（显示名、覆盖层触摸、接听权限、FGS 类型） |
 | 改中继 | 注意数据目录兼容性（`queues.log` 回放），以及 TURN 的 SSRF 默认拒绝回环 |
 | 部署中继 | `docs/中继部署指南.md`；验证用 `scripts/relay_check.py <ip>:8080 --dht` |
 
