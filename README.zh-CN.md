@@ -41,7 +41,7 @@
 
 **APK 不放在仓库里。** 一个包 26MB，历史版本累积起来会让 clone 变成几百 MB 且无法清理
 （二进制一旦进了 git 历史就删不掉，只能重写历史）。发布都放在
-[Releases](https://github.com/<owner>/veilwire/releases)。
+[Releases](https://github.com/qiujian444-dev/Veilwire/releases)。
 
 | 文件 | 用途 |
 |---|---|
@@ -424,7 +424,7 @@ bash scripts/build-android.sh release  # release，用本机 debug keystore 签�
 另外需要一个**纯 ASCII 的构建目录**（脚本会把源码复制过去编译，路径含中文时 Rust 链接会失败）。
 
 ```bash
-git clone https://github.com/<你的账号>/veilwire.git
+git clone https://github.com/qiujian444-dev/Veilwire.git
 cd veilwire
 
 export JAVA_HOME=/path/to/jdk-17

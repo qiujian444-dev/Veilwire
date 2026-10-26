@@ -42,7 +42,7 @@ class UnverifiedFilterTest {
         val out = filterUnverifiedKeys(
             keys = listOf("dh-alice", "张三", "陌生人 4f3a9c21"),
             knownDh = setOf("dh-alice"),
-            displayNames = setOf("张三", "ggyy"),
+            displayNames = setOf("张三", "carol"),
         )
         // 只剩那个真正的陌生会话
         assertEquals(listOf("陌生人 4f3a9c21"), out)

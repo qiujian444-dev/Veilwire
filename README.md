@@ -22,7 +22,7 @@ directory to take down.
 
 **APKs are not stored in this repository.** Each build is 26 MB; keeping history here would bloat every
 clone and could never be cleaned up. Releases live on the
-[Releases](https://github.com/<owner>/veilwire/releases) page.
+[Releases](https://github.com/qiujian444-dev/Veilwire/releases) page.
 
 | File | Purpose |
 |---|---|
@@ -226,7 +226,7 @@ encryption protects you from the relay — not from the client.
 So the safest option is not verification, it is **building it yourself**.
 
 ```bash
-git clone https://github.com/<owner>/veilwire.git
+git clone https://github.com/qiujian444-dev/Veilwire.git
 cd veilwire
 
 export JAVA_HOME=/path/to/jdk-17
