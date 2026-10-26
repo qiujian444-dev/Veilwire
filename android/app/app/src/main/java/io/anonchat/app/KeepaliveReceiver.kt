@@ -24,8 +24,13 @@ import androidx.core.content.ContextCompat
 class KeepaliveReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION_TICK) return
-        // 进程活着、服务在跑：什么都不用做，下一轮 recv（≤30s）自己恢复。
-        // 这里 launch 服务调用的意义只在"进程已被杀"的场合。
+        // 第一件事：续期下一个 9 分钟闹钟。早先漏了这一步——闹钟只在服务
+        // onStartCommand 里安排一次，tick 时服务还活着就直接 return，
+        // 之后进程被杀就再也没有人安排下一个闹钟，"逃生舱"只覆盖一跳。
+        schedule(context)
+        // 用户在设置里主动停过服务：尊重意图，不拉起（见 USER_STOPPED）。
+        val sp = context.getSharedPreferences("anon", Context.MODE_PRIVATE)
+        if (sp.getBoolean(PREF_USER_STOPPED, false)) return
         if (MessagingService.isRunning) return
         if (!Repo.hasIdentity()) return
         Log.i("AnonChat", "keepalive tick: process was dead, restarting service")
@@ -43,10 +48,11 @@ class KeepaliveReceiver : BroadcastReceiver() {
 
     companion object {
         const val ACTION_TICK = "io.anonchat.app.KEEPALIVE_TICK"
+        const val PREF_USER_STOPPED = "keepalive_user_stopped"
 
         /**
-         * 安排下一个闹钟。服务每次 onStartCommand 调一次；每轮 tick 若服务
-         * 意外死亡，下次 tick 再拉起——闹钟自己必须无限续期。
+         * 安排下一个闹钟。服务 onStartCommand 与每次 tick 都会调——
+         * 服务死亡 → 下一 tick 由本 receiver 复活；活着 → 单纯续期。
          * setExactAndAllowWhileIdle 在 Doze 下每包络期被系统限频到一次/9分钟，
          * 我们要的间隔恰好就是 9 分钟，这个限制不构成额外延迟。
          */

@@ -1,6 +1,8 @@
 package io.anonchat.app
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -8,6 +10,7 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
@@ -117,6 +120,20 @@ object CallManager {
 
     /** 每次通话只写一条记录，避免 dismiss/endCall 各写一次 */
     private var loggedEnd = false
+
+    /**
+     * 媒体栈代数：每次 resetPeer/closePeer 自增。
+     *
+     * createOffer/Answer 的回调跑在 WebRTC 线程，可能比用户点"取消"/超时
+     * 结束通话**更晚**到达——回调闭包里捕获的 pc 已被 dispose，对它调
+     * setLocalDescription 是 use-after-dispose（native 崩溃，runCatching
+     * 兜不住）。所有 SDP 回调入口先比对代数，代数不符直接丢弃。
+     */
+    @Volatile private var mediaGen: Int = 0
+
+    /** 回调入口的守卫：代数一致且当前 pc 就是回调捕获的那个才放行 */
+    private fun stale(gen: Int, captured: PeerConnection?): Boolean =
+        gen != mediaGen || captured == null || captured !== pc
 
     private var netCallback: android.net.ConnectivityManager.NetworkCallback? = null
     @Volatile private var firstNet = true
@@ -400,6 +417,10 @@ object CallManager {
     fun startCall(peerName: String, video: Boolean): String? {
         // 返回值只进 logcat（调用方 Log.w），技术信息，不本地化
         val ctx = appCtx ?: return "not initialized"
+        // 通话中不允许再拨：早先 resetPeer 排在 callStart 之前，通话中重复
+        // 触发拨打（菜单连点/权限回调回补）会先把当前通话的媒体栈整个拆掉，
+        // 即使 Rust 随后拒绝也已于事无补（二轮审计 P2-3）。
+        if (ui.visible) return "call in progress"
         resetPeer()
 
         val (callId, err) = Repo.callStart(peerName, video)
@@ -420,11 +441,16 @@ object CallManager {
 
         loggedEnd = false
         connectedAt = 0
-        ui = UiState(state = "outgoing", peerName = peerName, video = video)
+        // peerName 形参实际传的是会话键（dh，见 MainActivity.startCall），
+        // peerDh 一并填上：endCall 写通话记录要用它当会话键。
+        ui = UiState(state = "outgoing", peerName = peerName, peerDh = peerName, video = video)
         startTicker()
 
+        val gen = mediaGen
         pc.createOffer(sdpObserver(
             onOk = { sdp ->
+                // 回调可能比"用户取消/超时结束"更晚到：代数不符说明媒体栈已重建
+                if (stale(gen, pc)) return@sdpObserver
                 pc.setLocalDescription(setObserver("localDescription(offer)"), sdp)
                 val r = Repo.callSetOffer(sdp.description)
                 if (!r.ok) {
@@ -432,7 +458,10 @@ object CallManager {
                     Log.w(TAG, "send offer failed: ${r.error}")
                 }
             },
-            onFail = { e -> ui = ui.copy(err = AppError(ErrKind.CALL_OFFER_FAILED, e)) }
+            onFail = { e ->
+                if (stale(gen, pc)) return@sdpObserver
+                ui = ui.copy(err = AppError(ErrKind.CALL_OFFER_FAILED, e))
+            }
         ), offerConstraints(video))
 
         return null
@@ -522,17 +551,20 @@ object CallManager {
     /** 对端换网络后发来的重协商 offer：设远端 → createAnswer → 回传 */
     private fun onRenegotiateOffer(remoteSdp: String) {
         val pc = pc ?: return
+        val gen = mediaGen
         Log.i(TAG, "renegotiation offer received, rebuilding media")
         ui = ui.copy(renegotiating = true)
         applyRemoteSdp(remoteSdp, SessionDescription.Type.OFFER) {
             pc.createAnswer(sdpObserver(
                 onOk = { ans ->
+                    if (stale(gen, pc)) return@sdpObserver
                     pc.setLocalDescription(setObserver("localDescription(re-answer)"), ans)
                     val r = Repo.callAccept(ans.description)
                     ui = ui.copy(renegotiating = false)
                     if (!r.ok) Log.w(TAG, "send renegotiation answer failed: ${r.error}")
                 },
                 onFail = { e ->
+                    if (stale(gen, pc)) return@sdpObserver
                     ui = ui.copy(renegotiating = false, err = AppError(ErrKind.CALL_RENEGOTIATE_FAILED, "$e"))
                 }
             ), offerConstraints(ui.video))
@@ -565,12 +597,32 @@ object CallManager {
     /** 用户点了接听 */
     fun accept() {
         val c = pc ?: return
+        val gen = mediaGen
+        // 被叫也要查权限：主叫路径有 MainActivity.startCall 查，被叫（尤其
+        // 从 FSI 全屏接听进来）从来没查过——没授麦克风时接通后"对方听不见我"，
+        // 用户无从知道是权限问题（二轮审计 P2-4）。缺失时给出明确错误并留在
+        // 来电态（对面会超时，用户可去系统设置授权后重拨）。
+        val ctx = appCtx ?: return
+        val missing = buildList {
+            add(Manifest.permission.RECORD_AUDIO)
+            if (ui.video) add(Manifest.permission.CAMERA)
+        }.filter {
+            ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            Log.w(TAG, "accept without permissions: $missing")
+            ui = ui.copy(err = AppError(ErrKind.CALL_MIC_FAILED))
+            return
+        }
         if (!attachLocalMedia(c, ui.video)) {
             ui = ui.copy(err = AppError(ErrKind.CALL_MIC_FAILED))
             return
         }
         c.createAnswer(sdpObserver(
             onOk = { sdp ->
+                // 45s 振铃超时与用户点接听的竞态：超时先 closePeer 的话，
+                // 这个回调手里的 c 已经被 dispose，直接 return
+                if (stale(gen, c)) return@sdpObserver
                 c.setLocalDescription(setObserver("localDescription(answer)"), sdp)
                 val r = Repo.callAccept(sdp.description)
                 if (!r.ok) {
@@ -591,7 +643,10 @@ object CallManager {
                     connectedAt = System.currentTimeMillis()
                 }
             },
-            onFail = { e -> ui = ui.copy(err = AppError(ErrKind.CALL_ANSWER_FAILED, e)) }
+            onFail = { e ->
+                if (stale(gen, c)) return@sdpObserver
+                ui = ui.copy(err = AppError(ErrKind.CALL_ANSWER_FAILED, e))
+            }
         ), offerConstraints(ui.video))
     }
 
@@ -608,11 +663,12 @@ object CallManager {
     /** 本地结束，收尾但不重复发信令 */
     fun endCall(reason: String, send: Boolean = false, fromPeer: Boolean = false) {
         if (send) Repo.callHangup(reason)
-        // 通话记录：不留痕迹的话，未接来电在界面上等于没发生过
+        // 通话记录：不留痕迹的话，未接来电在界面上等于没发生过。
+        // 键必须是 peerDh（会话键=dh）：早先用 peerName，联系人来电的记录
+        // 落在显示名键下双向不可见，陌生人生成"陌生人 陌生人 x"幽灵会话。
         if (!loggedEnd) {
             loggedEnd = true
-            val who = ui.peerName.ifBlank { "未知联系人" }
-            // fromPeer 不用进消息体：读取方就是"对方发的记录"，方向由 outgoing 决定
+            val who = ui.peerDh.ifBlank { ui.peerName } // 兜底旧数据：peerDh 意外为空时保持旧行为
             runCatching { Repo.appendCallLog(who, callLogBody(reason, fromPeer)) }
         }
         CallNotifier.cancel(appCtx)
@@ -874,6 +930,7 @@ object CallManager {
     fun forceReconnect() {
         val pc = pc ?: return
         if (ui.state != "active" || ui.renegotiating) return
+        val gen = mediaGen
         Log.i(TAG, "ICE restart requested")
         ui = ui.copy(renegotiating = true, err = null)
         val c = MediaConstraints().apply {
@@ -884,6 +941,7 @@ object CallManager {
         pc.createOffer(
             sdpObserver(
                 onOk = { sdp ->
+                    if (stale(gen, pc)) return@sdpObserver
                     pc.setLocalDescription(setObserver("localDescription(restart)"), sdp)
                     val r = Repo.callRenegotiate(sdp.description)
                     if (!r.ok) {
@@ -893,6 +951,7 @@ object CallManager {
                     }
                 },
                 onFail = { e ->
+                    if (stale(gen, pc)) return@sdpObserver
                     ui = ui.copy(renegotiating = false, err = AppError(ErrKind.CALL_RECONNECT_FAILED, "$e"))
                 }
             ),
@@ -927,8 +986,9 @@ object CallManager {
         val pc = pc ?: return
         val c = IceCandidate(mid, mline, candidate)
         if (!remoteDescSet) {
-            // 远端描述还没设：先缓存，等设好了统一灌进去
-            pendingCandidates.add(c)
+            // 远端描述还没设：先缓存，等设好了统一灌进去。
+            // IO 线程 add / WebRTC 线程 flush / ticker 线程 clear——必须同步。
+            synchronized(pendingCandidates) { pendingCandidates.add(c) }
             return
         }
         runCatching { pc.addIceCandidate(c) }
@@ -937,8 +997,11 @@ object CallManager {
 
     private fun flushPendingCandidates() {
         val pc = pc ?: return
-        val list = pendingCandidates.toList()
-        pendingCandidates.clear()
+        val list = synchronized(pendingCandidates) {
+            val l = pendingCandidates.toList()
+            pendingCandidates.clear()
+            l
+        }
         list.forEach {
             runCatching { pc.addIceCandidate(it) }
                 .onFailure { e -> Log.w(TAG, "flush queued candidates failed: ${e.message}") }
@@ -1068,6 +1131,15 @@ object CallManager {
     // ------------------------------------------------------------ 清理
 
     private fun closePeer() {
+        // 代数先行：让在途的 SDP/ICE 回调立刻"过期"，后面的 dispose 才是安全的
+        mediaGen++
+        // 顺序要紧：先摘 sink（它们挂在 track 上），再 dispose 采集与源，
+        // 最后才是 pc。早先 pc.dispose() 排在 removeSink 之前——对已释放
+        // 的 native 轨道调 removeSink 是未定义行为。
+        runCatching { boundRemoteSink?.let { remoteVideoTrack?.removeSink(it) } }
+        runCatching { boundLocalSink?.let { videoTrack?.removeSink(it) } }
+        boundRemoteSink = null
+        boundLocalSink = null
         runCatching { capturer?.stopCapture() }
         runCatching { capturer?.dispose() }
         runCatching { surfaceHelper?.dispose() }
@@ -1075,10 +1147,6 @@ object CallManager {
         runCatching { audioSource?.dispose() }
         runCatching { pc?.close() }
         runCatching { pc?.dispose() }
-        runCatching { boundRemoteSink?.let { remoteVideoTrack?.removeSink(it) } }
-        runCatching { boundLocalSink?.let { videoTrack?.removeSink(it) } }
-        boundRemoteSink = null
-        boundLocalSink = null
         pc = null
         capturer = null
         surfaceHelper = null
@@ -1088,7 +1156,7 @@ object CallManager {
         audioTrack = null
         remoteVideoTrack = null
         remoteDescSet = false
-        pendingCandidates.clear()
+        synchronized(pendingCandidates) { pendingCandidates.clear() }
         stopNetworkWatch()
         // 顺序要紧：先放焦点，再改 mode。反过来的话音乐 App 可能收到"通话模式已结束"
         // 却仍被判为失去焦点，恢复播放要等更久。

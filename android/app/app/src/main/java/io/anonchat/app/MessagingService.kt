@@ -96,10 +96,17 @@ class MessagingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                // 记住"用户主动停"：否则 keepalive 会在下一个 9 分钟把
+                // 用户手动关掉的服务又拉起来（二轮审计 P2-12）。
+                getSharedPreferences("anon", Context.MODE_PRIVATE)
+                    .edit().putBoolean(KeepaliveReceiver.PREF_USER_STOPPED, true).apply()
                 shutdown()
                 return START_NOT_STICKY
             }
             else -> {
+                // 任何一次显式启动（用户点"开启"或 UI 引导）都视为撤销停止意图
+                getSharedPreferences("anon", Context.MODE_PRIVATE)
+                    .edit().putBoolean(KeepaliveReceiver.PREF_USER_STOPPED, false).apply()
                 // 服务可能被系统单独拉起（进程被杀后 START_STICKY 重启），
                 // 这时 MainActivity.onCreate 没有跑过，必须自己初始化一次
                 Repo.init(this)
@@ -254,6 +261,13 @@ class MessagingService : Service() {
                         } else if (inc.isCall) {
                             // 通话信令：交给状态机 + WebRTC，不弹"新消息"通知
                             CallManager.onSignal(inc)
+                        } else if (inc.isBlob || inc.kind == "recall") {
+                            // 文件/语音/图片/视频的**每个分块**都是一条独立消息，
+                            // 20MB 文件 ≈ 854 块：不在这里计未读/弹通知（否则就是
+                            // 854 条通知+854 未读，二轮审计 P1-4）。未读+通知由
+                            // "收齐落盘"的路径负责（receiveFileChunk）。
+                            // 撤回记录同理：不产生未读、通知正文也是空的。
+                            // 收齐后的落盘通知：文件/语音/图片/视频只在**收齐**时发一条
                         } else {
                             // 未读数：正开着这个会话就不计（markUnread 内部判断）
                             Repo.markUnread(Repo.whoOf(inc))
@@ -316,16 +330,17 @@ class MessagingService : Service() {
     }
 
     private fun notifyMessage(inc: Incoming) {
-        // 通话中不再为普通消息弹通知，避免盖住通话界面
-        if (CallManager.ui.visible) return
+        // 只在"通话 UI 正在前台展示"时抑制：早先 `CallManager.ui.visible` 是
+        // 进程级状态——只要有电话存在（哪怕切到后台），所有联系人的新消息
+        // 全部静默，叠加"活跃通话无常驻通知"就像 App 死了（二轮审计 P2-6）。
+        if (MainActivity.resumed && CallManager.ui.visible) return
         // 用户正开着这个会话的聊天页（App 在前台）：消息实时显示在界面上，
         // 再弹一条通知纯属打扰。注意只在"前台 + 正是这个会话"时抑制。
         // 会话键要用 whoOf（fromName 可能为空，落库键和聊天页标题都用它）。
-        if (MainActivity.resumed && MainActivity.openPeer != null
-            && MainActivity.openPeer == Repo.whoOf(inc)
-        ) return
+        val who = Repo.whoOf(inc)
+        if (MainActivity.resumed && MainActivity.openPeer == who) return
         val nm = getSystemService(NotificationManager::class.java)
-        val who = inc.fromName ?: getString(R.string.notif_new_message)
+        val title = inc.fromName ?: getString(R.string.notif_new_message)
         // 通知栏是阅后即焚最大的洞：内容进了通知历史（Android 13+ 可回翻）
         // 就等于永久留了一份，焚毁删不掉它。所以焚毁消息必须脱敏；
         // 顺手把附件消息的 JSON 串也换成一句人话（之前通知里显示的是原始 JSON）。
@@ -334,14 +349,29 @@ class MessagingService : Service() {
             inc.isBlob -> getString(R.string.notif_blob_body)
             else -> inc.text
         }
+        // 点击进 App 并直达该会话：早先没有 contentIntent，点横幅什么都不会发生。
+        val pi = android.app.PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(MainActivity.EXTRA_OPEN_PEER, who)
+            },
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        // 自增 ID（避开前台 2001 / 来电 3001）：早先 currentTimeMillis()%10000
+        // 同桶顶掉前一条，还会撞上常驻通知的 ID 把它们整条替换掉。
+        val id = 10000 + (notifSeq.incrementAndGet() % 100000)
         val n = Notification.Builder(this, ensureMsgChannel())
-            .setContentTitle(who)
+            .setContentTitle(title)
             .setContentText(body)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setAutoCancel(true)
+            .setContentIntent(pi)
             .build()
-        nm.notify((System.currentTimeMillis() % 10000).toInt(), n)
+        nm.notify(id, n)
     }
+
+    private val notifSeq = java.util.concurrent.atomic.AtomicInteger(0)
 
     private suspend fun statsLoop() {
         val f = File(getExternalFilesDir(null) ?: filesDir, "stage0-stats.csv")
@@ -381,6 +411,11 @@ class MessagingService : Service() {
         isRunning = false
         loopJob?.cancel()
         statsJob?.cancel()
+        // 必须置空：onStartCommand 用 `loopJob == null` 判断要不要重启循环，
+        // 留着已 cancel 的 Job 的话，快速关→开会得到"前台通知在、收消息停"
+        // 的僵尸服务，最长要等 9 分钟 keepalive 拉新实例才自愈。
+        loopJob = null
+        statsJob = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {

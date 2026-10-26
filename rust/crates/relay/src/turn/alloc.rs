@@ -129,13 +129,38 @@ impl State {
             return Err(AllocErr::Quota);
         }
         let port = self.pool.acquire().ok_or(AllocErr::Quota)?;
-        let sock = match UdpSocket::bind(("0.0.0.0", port)).await {
-            Ok(s) => s,
-            Err(_) => {
-                self.pool.release(port);
-                return Err(AllocErr::Quota);
+        // bind 失败换下一个端口重试：remove() 释放的端口可能还被刚退出的
+        // reader 任务短暂持有（Arc<UdpSocket> 未 drop），立即复用会 EADDRINUSE。
+        // 早先把 bind 失败一律映射成 Quota，叠加"released 优先弹出"，会让
+        // 所有新分配在窗口内连续 486。
+        let sock = {
+            let mut tried = 0;
+            let mut cur = Some(port);
+            let mut made = None;
+            while tried < 3 {
+                let p = cur.take().unwrap();
+                match UdpSocket::bind(("0.0.0.0", p)).await {
+                    Ok(s) => {
+                        made = Some((p, s));
+                        break;
+                    }
+                    Err(_) => {
+                        self.pool.release(p);
+                        tried += 1;
+                        cur = self.pool.acquire();
+                        if cur.is_none() {
+                            break;
+                        }
+                    }
+                }
+            }
+            match made {
+                Some((p, s)) => (p, s),
+                None => return Err(AllocErr::Quota),
             }
         };
+        let port = sock.0;
+        let sock = sock.1;
         let secs = lifetime.clamp(MIN_LIFETIME, MAX_LIFETIME);
         self.allocs.insert(
             client,

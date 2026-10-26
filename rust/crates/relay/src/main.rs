@@ -379,6 +379,14 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
             }
         };
 
+        // 字段长度统一设防：body 有 64KiB 上限，但 qid/id 是任意长 String——
+        // 一条 Put 携带 16MB 的 id 就能在"合法速率"内灌盘灌内存（二轮审计 P2-3）。
+        // qid 恒为 32 hex、id 恒为 32 hex（proto 生成），超长的一律 bad_frame。
+        if !frame.check_sizes() {
+            let _ = tx.send(ServerFrame::err("bad_frame", "字段长度不合法"));
+            continue;
+        }
+
         match frame {
             ClientFrame::New { v } => {
                 if v != PROTOCOL_VERSION {
@@ -426,6 +434,14 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
 
             ClientFrame::Sub { qid } => {
                 let mut st = state.lock().await;
+                // 队列必须存在才注册：对任意字符串无脑注册的话，一个连接
+                // 高速发海量 Sub 就能让 subs 表内存膨胀（sweep 只清 closed
+                // 通道，不清没有对应队列的条目）。合法流程 New 必然先于 Sub。
+                if !st.queues.contains_key(&qid) {
+                    drop(st);
+                    let _ = tx.send(ServerFrame::err("no_queue", "队列不存在或已过期"));
+                    continue;
+                }
                 // 同连接对同队列重复 Sub：只注册一次。重复注册的话之后每条
                 // 消息这个连接会收到 N 份重复推送（客户端去重能兜，但白费带宽）。
                 let already = st.subs.get(&qid).map(|v| v.iter().any(|x| x.same_channel(&tx)));
@@ -536,12 +552,39 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
             }
 
             ClientFrame::Ack { qid, ids } => {
-                let mut st = state.lock().await;
-                if let Some(q) = st.queues.get_mut(&qid) {
-                    q.msgs.retain(|m| !ids.contains(&m.id));
+                // Ack 与 put/new/get_turn 共享速率窗口：ids 数组无上限、队列
+                // 不存在也照写日志的话，一个匿名连接就能把第一轮想堵的磁盘
+                // DoS 从侧门重新打开（二轮审计 P1-2）。
+                if rate_limit > 0 {
+                    if window_start.elapsed() >= Duration::from_secs(60) {
+                        window_start = std::time::Instant::now();
+                        puts_in_window = 0;
+                    }
+                    if puts_in_window >= rate_limit {
+                        let _ = tx.send(ServerFrame::err(
+                            "rate_limited",
+                            format!("超过速率限制（{rate_limit} 条/分钟），请稍后重试"),
+                        ));
+                        continue;
+                    }
+                    puts_in_window += 1;
                 }
-                if let Err(e) = st.log.append_ack(&qid, &ids) {
-                    eprintln!("[relay] 持久化失败（ACK）: {e:#}");
+                // ids 条数上限：一条 ack 里带几万个 id 既是放大写盘的载体，
+                // 也让下面的 retain 退化为 O(消息数×ids数)。64 远超正常客户端
+                // 的单批确认量（分批 ack 是客户端既有行为）。
+                if ids.len() > 64 {
+                    let _ = tx.send(ServerFrame::err("bad_frame", "ack 一次最多确认 64 条"));
+                    continue;
+                }
+                let mut st = state.lock().await;
+                let exists = st.queues.contains_key(&qid);
+                if exists {
+                    if let Some(q) = st.queues.get_mut(&qid) {
+                        q.msgs.retain(|m| !ids.contains(&m.id));
+                    }
+                    if let Err(e) = st.log.append_ack(&qid, &ids) {
+                        eprintln!("[relay] 持久化失败（ACK）: {e:#}");
+                    }
                 }
                 drop(st);
                 let _ = tx.send(ServerFrame::Ok { ref_id: "ack".into() });

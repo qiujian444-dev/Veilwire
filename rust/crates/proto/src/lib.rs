@@ -21,6 +21,27 @@ pub const QUEUE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 /// 单条消息体上限 64 KiB（阶段 0 限制，大文件走 DataChannel）。
 pub const MAX_BODY_LEN: usize = 64 * 1024;
 
+/// 队列/消息 ID 的合法长度：恒为 32 位 hex（`new_queue_id` 的输出）。
+/// 中继对线上来的帧统一校验：超长 id 可以在"合法速率"内灌盘灌内存
+/// （120 条/分钟 × 每条 16MB 的 id ≈ 1.9GB/分钟/连接）。
+pub const MAX_ID_LEN: usize = 64;
+
+impl ClientFrame {
+    /// 中继入口的字段长度设防。body 长度在 Put 分支单独查（有专用错误码
+    /// too_large），这里只管 id/qid 这类"协议里恒为短 hex"的字段。
+    pub fn check_sizes(&self) -> bool {
+        fn ok(s: &str) -> bool {
+            s.len() <= MAX_ID_LEN
+        }
+        match self {
+            ClientFrame::New { .. } | ClientFrame::Ping | ClientFrame::GetTurn => true,
+            ClientFrame::Sub { qid } | ClientFrame::Get { qid } => ok(qid),
+            ClientFrame::Put { qid, id, .. } => ok(qid) && ok(id),
+            ClientFrame::Ack { qid, ids } => ok(qid) && ids.len() <= 64 && ids.iter().all(|i| ok(i)),
+        }
+    }
+}
+
 /// 客户端 → 中继
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]

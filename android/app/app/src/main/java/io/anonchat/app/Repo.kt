@@ -266,7 +266,6 @@ data class Res<T>(val data: T?, val error: String? = null, val err: AppError? = 
  * - 消息历史（明文，仅供 UI 展示用；真正的密钥材料在 filesDir/device 下）
  */
 object Repo {
-    private var ready = false
     private lateinit var deviceDir: File
 
     /**
@@ -308,32 +307,39 @@ object Repo {
     fun totalUnread(): Int = synchronized(msgLock) { unread.values.sum() }
 
     /**
-     * 初始化。**幂等**：Activity、前台服务、开机接收器都可能调用它。
-     *
-     * 幂等很重要：进程被系统杀掉后，START_STICKY 会让服务自己重启，
-     * 此时 Activity 的 onCreate 根本没跑过。如果这里依赖"先调 init"，
-     * 服务就会拿着未初始化的路径去收消息，表现为"服务在跑但收不到任何东西"。
+     * 初始化。**幂等且线程安全**：Activity、前台服务、开机接收器都可能调用它，
+     * 且 BootReceiver 在 IO 线程调、Activity 在主线程调——两边并发进入时
+     * 早期 `if (ready) return` 会双双放行，产生两个 MsgStore 指向同一个
+     * messages.log（双份后台线程、rewrite 互踩、最坏整份历史损坏）。
+     * 双检锁保证只初始化一次。
      */
+    @Volatile
+    private var ready = false
+    private val initLock = Any()
+
     fun init(ctx: Context) {
         if (ready) return
-        appCtx = ctx.applicationContext
-        deviceDir = File(ctx.filesDir, "device")
-        store = MsgStore(ctx.filesDir)
-        cardFile = File(ctx.filesDir, "peer_cards.json")
-        relay = ctx.getSharedPreferences("anon", Context.MODE_PRIVATE)
-            .getString("relay", "") ?: ""
-        // 载入历史（顺便把老版本 messages.json 迁过来）；压缩放到后台，
-        // 别让它拖慢冷启动——它只在日志膨胀时才真干活。
-        store.load()
-        // 0.12.0 起会话键从"显示名"改成 dh。这里做一次性迁移：
-        // 旧日志里 `w` 是名字，靠联系人表 + 陌生人来信卡片（都带 dh）反查。
-        // 找不到映射的（比如对方卡片也没了）保留原名，不丢数据。
-        runCatching { migrateConversationKeys() }
-        Thread { runCatching { store.compactIfNeeded() } }.start()
-        // 启动清扫：被杀期间到期的焚毁消息，回来第一件事就是删掉
-        Thread { runCatching { sweepExpired() } }.start()
-        loadCards()
-        ready = true
+        synchronized(initLock) {
+            if (ready) return
+            appCtx = ctx.applicationContext
+            deviceDir = File(ctx.filesDir, "device")
+            store = MsgStore(ctx.filesDir)
+            cardFile = File(ctx.filesDir, "peer_cards.json")
+            relay = ctx.getSharedPreferences("anon", Context.MODE_PRIVATE)
+                .getString("relay", "") ?: ""
+            // 载入历史（顺便把老版本 messages.json 迁过来）；压缩放到后台，
+            // 别让它拖慢冷启动——它只在日志膨胀时才真干活。
+            store.load()
+            // 0.12.0 起会话键从"显示名"改成 dh。这里做一次性迁移：
+            // 旧日志里 `w` 是名字，靠联系人表 + 陌生人来信卡片（都带 dh）反查。
+            // 找不到映射的（比如对方卡片也没了）保留原名，不丢数据。
+            runCatching { migrateConversationKeys() }
+            Thread { runCatching { store.compactIfNeeded() } }.start()
+            // 启动清扫：被杀期间到期的焚毁消息，回来第一件事就是删掉
+            Thread { runCatching { sweepExpired() } }.start()
+            loadCards()
+            ready = true
+        }
     }
 
     /** 名字 → dh 的映射，用于把旧会话键迁移过来 */
@@ -407,14 +413,21 @@ object Repo {
     }
 
     /**
-     * 只删聊天记录（保留联系人）：消息 + 该会话的文件副本 + 陌生人来信卡片。
+     * 只删聊天记录（保留联系人）：消息 + 该会话的文件副本 + 陌生人来信卡片 + 未读。
      * 返回删掉的消息条数。
+     *
+     * 未读必须一起清：删联系人后该键从列表消失，clearUnread 永远没有调用机会，
+     * 导航角标会永久计入一个已不存在的会话（只能清数据才能消掉）。
      */
     fun deleteConversation(key: String): Int {
         val msgs = store.slice(key, 0, Int.MAX_VALUE)
         msgs.forEach { m -> deleteBlobFiles(m) }
-        val n = synchronized(msgLock) { store.dropConversation(key) }
-        synchronized(msgLock) { peerCards.remove(key) }
+        val n = synchronized(msgLock) {
+            store.dropConversation(key)
+            peerCards.remove(key)
+            unread.remove(key)
+            0 + msgs.size
+        }
         saveCards()
         return n
     }
@@ -665,7 +678,10 @@ object Repo {
         if (e == null) {
             append(to, Msg(text, now, outgoing = true, rid = d as? String ?: "", burn = burn))
         } else {
-            append(to, Msg(text, now, outgoing = true, failed = true))
+            // 失败消息也要记住 burn 档位：重发时按原档重发。丢掉它的话，
+            // "失败→重发"之后阅后即焚会静默变成永久消息（隐私语义变更，
+            // 用户无从发现——二轮审计 P2）。
+            append(to, Msg(text, now, outgoing = true, failed = true, burn = burn))
         }
         return Res(if (e == null) Unit else null, e)
     }
@@ -676,16 +692,21 @@ object Repo {
      * 成功后**删掉失败那条、在末尾追加一条新的**（带新 rid）而不是原位回填：
      * 重发是第二次传输，对方收到的是新载荷新 id，原位的旧记录留着 rid 也是空的，
      * 撤回时对不上。排到末尾和微信"重发"的观感一致。
+     * 焚毁档位随失败记录保留，重发按原档走（burn > 0 走 sendBurn）。
      */
     fun resend(who: String, m: Msg): Res<Unit> {
         if (!m.failed) return Res(Unit, null)
         if (m.id == 0L) return Res(null, err = AppError(ErrKind.RESEND_TOO_OLD))
-        val (d, e) = envelope(Native.send(dir, who, m.text))
+        val (d, e) = if (m.burn > 0) {
+            envelope(Native.sendBurn(dir, who, m.text, m.burn))
+        } else {
+            envelope(Native.send(dir, who, m.text))
+        }
         if (e != null) return Res(null, e)
         store.deleteById(who, m.id)
         append(
             who,
-            Msg(m.text, System.currentTimeMillis() / 1000, outgoing = true, rid = d as? String ?: "")
+            Msg(m.text, System.currentTimeMillis() / 1000, outgoing = true, rid = d as? String ?: "", burn = m.burn)
         )
         return Res(Unit, null)
     }
@@ -1116,8 +1137,18 @@ object Repo {
                 )
             )
             markUnread(who)
+            // 收齐才通知一次（分块期间不弹）：回调由 service 层注入
+            onFileDone?.invoke(who, prog.name)
         }
     }
+
+    /**
+     * 文件收齐落盘后的回调（who, name）。MessagingService 注入它来发一条
+     * "收到文件"通知——分块本身的每一条消息在 listenLoop 被跳过（否则
+     * 20MB 文件就是 854 条通知），通知必须挪到这里才只发一条。
+     */
+    @Volatile
+    var onFileDone: ((String, String) -> Unit)? = null
 
     // ---------------------------------------------------------------- 紧急清除
 
@@ -1487,6 +1518,12 @@ object Repo {
      *
      * [renameCard] 为 true 时才把卡片名改成新键——键是 dh 的时候不能改，
      * 否则卡片名会变成一个哈希串，界面上直接显示它。
+     *
+     * 卡片里的 `dh` 字段**必须同步改写为目标键**（当目标键是 dh 时）：
+     * 只搬不改的话，peer_cards.json 里存的是 `peerCards[newDh].dh == 旧dh`，
+     * 重启时 migrateConversationKeys 会构建 [新dh → 旧dh] 的映射，把刚搬过来
+     * 的会话再搬回死信箱——联系人历史清空、以陌生人会话重现，且每次重启
+     * 复发（0.15.5 合并功能引入的回归，二轮审计 P1-6）。
      */
     private fun moveConversation(from: String, to: String, renameCard: Boolean = true) {
         if (from == to) return
@@ -1495,9 +1532,23 @@ object Repo {
         synchronized(msgLock) {
             val u = unread.remove(from)
             if (u != null) unread[to] = (unread[to] ?: 0) + u
-            // 卡片要跟着搬：留着旧键的话，新键下没有对方公钥，安全码就再也算不出来
-            val card = peerCards.remove(from)
-            if (card != null) peerCards[to] = if (renameCard) card.copy(name = to) else card
+            // 卡片跟着搬，并把 dh 改写为新键；目标键已有卡片时做字段合并——
+            // 路由（qid/relays）取新键侧（旧键指向死信箱），核对状态保留原值
+            // （pk 未变则安全码不变，verified 语义不丢）。
+            val moved = peerCards.remove(from)
+            if (moved != null) {
+                val merged = peerCards[to]?.let { keep ->
+                    // 新键已有卡片：路由以新键为准，核对状态沿用旧卡
+                    moved.copy(
+                        dh = to,
+                        qid = keep.qid,
+                        relays = keep.relays,
+                        verified = keep.verified,
+                        verifiedCode = keep.verifiedCode,
+                    )
+                } ?: moved.copy(dh = to)
+                peerCards[to] = merged
+            }
         }
         saveCards()
     }
@@ -1536,6 +1587,18 @@ object Repo {
                         verifiedCode = o.optString("vcode", ""),
                     )
                 }
+                // 自愈存量损坏：0.15.5 的合并 bug 会在文件里留下 `dh ≠ 键`
+                // 的卡片（键是 dh、dh 字段还是旧值），重启时迁移逻辑会把会话
+                // 搬回死信箱。卡片键本身就是 dh（联系人卡与回邀卡都按此约定），
+                // 不一致的一律就地改写。改完落盘一次。
+                var dirty = false
+                for ((k, c) in peerCards) {
+                    if (c.dh != k && k.length == 43) {
+                        peerCards[k] = c.copy(dh = k)
+                        dirty = true
+                    }
+                }
+                if (dirty) saveCards()
             }
         }
     }
@@ -1543,12 +1606,19 @@ object Repo {
     /**
      * 写一条通话记录进聊天。
      *
-     * 为什么必须写：不留记录的话，未接来电在界面上**完全没有痕迹**，
+     * [peerDh] 必须是**会话键（dh）**，不是显示名：会话列表按 dh 取最后一条、
+     * 陌生人过滤按 dh 比对——传显示名的话联系人来电记录双向不可见、陌生人
+     * 来电产生"陌生人 陌生人 x"幽灵会话（二轮审计 P1-3）。显示名由列表的
+     * displayNameOf(dh) 统一解析，调用方不用管。
+     *
+     * 为什么必须写记录：不留的话，未接来电在界面上**完全没有痕迹**，
      * 用户只会觉得"手机没响过"。这是通话功能和消息功能之间最容易漏掉的衔接点。
      */
-    fun appendCallLog(peerName: String, text: String) {
-        val who = peerName.ifBlank { "未知联系人" }
-        append(who, Msg(text, System.currentTimeMillis() / 1000, outgoing = true, kind = "call"))
+    fun appendCallLog(peerDh: String, text: String) {
+        if (peerDh.isBlank()) return
+        append(peerDh, Msg(text, System.currentTimeMillis() / 1000, outgoing = true, kind = "call"))
+        // 未接来电要有角标：来电记录不经过 notifyMessage，只能在这里补
+        markUnread(peerDh)
     }
 
     private fun append(who: String, m: Msg) {

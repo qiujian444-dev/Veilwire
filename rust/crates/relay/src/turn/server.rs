@@ -64,8 +64,17 @@ pub async fn run(cfg: Config) -> Result<()> {
     loop {
         tokio::select! {
             r = sock.recv_from(&mut buf) => {
-                let (n, from) = r?;
-                handle_client(&sock, &mut state, &mut creds, &cfg, &tx, &buf[..n], from).await;
+                // 瞬态读错误必须容忍：Windows 上向已关闭的客户端端口发包后
+                // 收到 ICMP 会让 recv_from 返回 WSAECONNRESET，这是 UDP 服务
+                // 的常态。早先直接 `?` 会用一包打死整个 TURN 服务。
+                match r {
+                    Ok((n, from)) => {
+                        handle_client(&sock, &mut state, &mut creds, &cfg, &tx, &buf[..n], from).await;
+                    }
+                    Err(e) => {
+                        log_warn(&format!("TURN recv 暂时性错误（忽略）: {e}"));
+                    }
+                }
             }
             Some(p) = rx.recv() => {
                 send_to_client(&sock, &state, p).await;
@@ -412,6 +421,14 @@ fn spawn_relay_reader(
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65_535];
         loop {
+            // alive 每轮循环都查，**不是只在超时路径查**：早先只在 5 秒超时
+            // 分支看标志，只要对端媒体包持续到达（通话在继续），recv_from
+            // 永远成功、reader 永不退出、socket 永不关闭——而 remove() 已经
+            // 把端口放回池子，新分配弹出这个端口 bind 必然失败（被映射成
+            // 486），等于一路过期通话能级联打死整个 TURN（二轮审计 P1-3）。
+            if !alive.load(Ordering::Relaxed) {
+                break;
+            }
             match timeout(Duration::from_secs(5), relay.recv_from(&mut buf)).await {
                 Ok(Ok((n, peer))) => {
                     let pkt = RelayPkt { client, peer, data: buf[..n].to_vec() };
@@ -419,7 +436,9 @@ fn spawn_relay_reader(
                         break; // 主循环没了，任务退出
                     }
                 }
-                Ok(Err(_)) => break,
+                // 瞬态读错误（如 ICMP 触发的 ECONNRESET）不应打死单路数据面：
+                // 记录并继续，分配本身还活着。
+                Ok(Err(_)) => continue,
                 Err(_) => {
                     if !alive.load(Ordering::Relaxed) {
                         break;

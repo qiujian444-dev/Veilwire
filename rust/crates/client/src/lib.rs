@@ -1083,13 +1083,19 @@ fn send_kind(dir: &str, to: &str, kind: &str, text: &str, body: Option<&str>) ->
         },
     )?;
 
+    // 棘轮已在加密时推进，必须在密文离开本机之前落盘（与 send_batch 同一
+    // 道理）：put_first 中途失败时这条消息可能已进对方队列，磁盘若还停在
+    // 旧棘轮，下一条消息（哪怕只是普通文本）会被对端判重复吞掉或 MAC 永败。
+    // send_kind 是单条主路径，0.15.6 只修了批量，这条漏到二轮审计才补上。
+    dev.save(&dir)?;
+
     if c.relays.is_empty() {
         return Err(anyhow!("联系人没有可用的中继地址"));
     }
     let used = rt().block_on(put_first(&c.relays, &c.qid, &[w]))?;
     promote_contact_relay(&dir, &c.dh, &used);
 
-    // 发送推进了棘轮，必须落盘
+    // 投递成功后的这次 save 是幂等冗余，兜底将来有人在中间插入设备状态修改
     dev.save(&dir)?;
     Ok(mid)
 }

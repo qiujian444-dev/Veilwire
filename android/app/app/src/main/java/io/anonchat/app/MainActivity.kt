@@ -130,6 +130,10 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** 从来电通知点进来时带这个标记，直接展开通话界面 */
         const val EXTRA_SHOW_CALL = "show_call"
+        /** 从消息通知点进来时带目标会话键（dh），直达该聊天页 */
+        const val EXTRA_OPEN_PEER = "open_peer"
+        /** 通知点击带来的待打开会话键（onNewIntent 与冷启动都可能写入） */
+        var pendingOpenPeer: String? = null
         /** 调试用：跑 WebRTC 自检，只打日志 */
         const val EXTRA_SELFTEST = "selftest"
 
@@ -184,6 +188,8 @@ class MainActivity : ComponentActivity() {
         if (intent?.getBooleanExtra(EXTRA_SHOW_CALL, false) == true) {
             Log.i("AnonChat", "launched from incoming call notification")
         }
+        // 消息通知点击：记住目标会话，Root 组装后消费（onNewIntent 同样处理）
+        intent?.getStringExtra(EXTRA_OPEN_PEER)?.let { pendingOpenPeer = it }
         if (intent?.getBooleanExtra(EXTRA_SELFTEST, false) == true) {
             WebRtcSelfTest.run(this)
         }
@@ -226,6 +232,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        // App 已在后台、通知再点进来走 onNewIntent：这里补一次消费
+        intent?.getStringExtra(EXTRA_OPEN_PEER)?.let { pendingOpenPeer = it }
     }
 
     override fun onPause() {
@@ -272,6 +280,18 @@ private fun Root(
         mutableStateOf<Any>(if (hasIdentity) Tab.Chats else Screen.Setup)
     }
     var tick by remember { mutableStateOf(0) }
+
+    // 消息通知点击 → 直达该会话。pendingOpenPeer 由 onCreate/onNewIntent 写入
+    // （通知的 contentIntent 带 EXTRA_OPEN_PEER），这里消费掉。
+    LaunchedEffect(MessagingService.inboxTick) {
+        MainActivity.pendingOpenPeer?.let { peer ->
+            MainActivity.pendingOpenPeer = null
+            if (hasIdentity) {
+                screen = Screen.Chat(peer)
+                tick++
+            }
+        }
+    }
 
     // 底部 Tab 未读角标：读 inboxTick（Compose 可观察状态）让新消息驱动重组
     @Suppress("UNUSED_EXPRESSION")
@@ -2644,7 +2664,11 @@ private fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 state = listState,
             ) {
-                itemsIndexed(msgs) { idx, m ->
+                itemsIndexed(msgs, key = { _, m -> m.id }) { idx, m ->
+                    // key 用消息 id：滑动窗口前移时（新消息到达、from 前移一格）
+                    // 所有保留下标集体前移，无 key 的话 Compose 会把状态错绑到
+                    // 邻居——最典型的是长按菜单开着时来新消息，菜单悄悄改绑，
+                    // 此时点"删除/撤回"作用在错误的消息上（二轮审计 P2-13）。
                     // 读 burnTick：让焚毁倒计时气泡每秒重组一次（tick 的唯一用途）
                     @Suppress("UNUSED_EXPRESSION") burnTick
                     val nowSecs = System.currentTimeMillis() / 1000
