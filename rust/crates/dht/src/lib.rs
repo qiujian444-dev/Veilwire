@@ -863,6 +863,18 @@ pub async fn run(cfg: DhtConfig) {
     );
 
     loop {
+        // 每轮都把静态种子并进来：爬到的一批节点可能全部下线（普通 BT 客户端
+        // 地址本来就会腐烂），一旦 seeds 完全依赖上一轮爬取结果且那批全死，
+        // 后续 crawl 从死集合出发、永远归零，只剩一行警告、没有自愈路径（P3）。
+        // STATIC_SEEDS 是 IP 直连，解析零成本。
+        {
+            let mut seen: std::collections::HashSet<_> = seeds.iter().map(|n| n.addr).collect();
+            for n in resolve_seeds(&cfg.seeds).await {
+                if seen.insert(n.addr) {
+                    seeds.push(n);
+                }
+            }
+        }
         let nodes = crawl(&krpc, &seeds, &ws_key, cfg.crawl).await;
         if nodes.len() < 3 {
             eprintln!(

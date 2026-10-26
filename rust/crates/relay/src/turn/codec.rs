@@ -261,6 +261,22 @@ impl Msg {
         self.attrs.push((ty, v));
     }
 
+    /// 明文地址属性（RFC 5389 §15.1 的 MAPPED-ADDRESS）。
+    ///
+    /// 与 `add_xor_addr` 的区别就是"不 XOR、端口也不异或"——MAPPED-ADDRESS
+    /// 定义上就是明文。早先拿 XOR 编码器写它，按标准解析 0x0001 的客户端会
+    /// 得到一个完全不相关的 IP（P3）。现代客户端只用 XOR-MAPPED，这条纯属
+    /// 给实现严格的老客户端做兼容。
+    pub fn add_plain_addr(&mut self, ty: u16, addr: std::net::SocketAddr) {
+        let std::net::SocketAddr::V4(v4) = addr else { return };
+        let mut v = Vec::with_capacity(8);
+        v.push(0);
+        v.push(0x01); // IPv4
+        v.extend_from_slice(&addr.port().to_be_bytes());
+        v.extend_from_slice(&v4.ip().octets());
+        self.attrs.push((ty, v));
+    }
+
     /// ERROR-CODE（RFC 5389 §15.6）：class 是 3 位数的高位（4/5/6），number 是低 8 位
     pub fn add_error(&mut self, code: u16, reason: &str) {
         let class = (code / 100) as u8 & 0x07;

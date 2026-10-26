@@ -54,8 +54,10 @@ fun CallScreen(onClose: () -> Unit) {
     var elapsed by remember { mutableStateOf(0L) }
 
     // 通话计时。放在这里而不是只靠 CallManager，是为了避免 UI 重建时计时归零。
+    // 进入 active 的第一秒用 CallManager 的值兜底：早先 elapsed 初值是 0，
+    // ticker 首格未到前会先显示一下 00:00（P3）。
     LaunchedEffect(ui.state) {
-        elapsed = ui.elapsedSecs
+        elapsed = if (ui.elapsedSecs > 0) ui.elapsedSecs else 0L
         while (ui.state == "active") {
             delay(1_000)
             elapsed += 1
@@ -70,7 +72,10 @@ fun CallScreen(onClose: () -> Unit) {
         // 视频通话时铺满远端画面
         if (ui.video) {
             RemoteVideo()
-            if (ui.state == "active") LocalVideo()
+            // 本地预览在 outgoing 阶段也显示：主叫拨出后看不到自己的画面，
+            // 与主流 IM 体验不一致（P3）。此时媒体已 attach（attachLocalMedia
+            // 在 startCall 里做），渲染器挂上就能出图。
+            LocalVideo()
         }
 
         Column(

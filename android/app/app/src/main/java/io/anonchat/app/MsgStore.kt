@@ -115,12 +115,13 @@ class MsgStore(private val dir: File) {
     }
 
     /**
-     * 把某条消息的"发送失败"标记抹掉（重发成功后调用）。
+     * 把某条消息的"发送失败"标记抹掉。
      *
-     * 日志是 append-only 的，改不了旧行，所以追加一条 st 记录：
-     * 回放时按 id 找到那条消息，把 failed 置回 false。内存里同步改，
-     * 这样 UI 立刻能看到，不用等下次重启。
+     * **写侧已无调用方**（重发改为 deleteById+append，见 Repo.resend），
+     * 这里保留解析侧对老日志里 `"st"` 记录的兼容（replay 的 "st" 分支）。
+     * 不要再往日志里写 st 记录——追加 del+m 才是现在的唯一路径。
      */
+    @Deprecated("重发已改为 deleteById+append；仅保留回放兼容")
     fun markSent(who: String, id: Long) {
         synchronized(this) {
             val list = data[who] ?: return

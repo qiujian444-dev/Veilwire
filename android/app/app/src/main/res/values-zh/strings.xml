@@ -426,6 +426,7 @@
     <string name="msg_svc_text_in_call">通话中</string>
     <string name="msg_svc_text_battery">建议授予电池白名单，否则息屏后会断</string>
     <string name="msg_svc_text_relay_down">收不到消息：中继连不上。可在设置中更换中继地址</string>
+    <string name="msg_svc_text_storage_bad">本地存储写入失败：新消息在重启后可能丢失。请清理设备空间</string>
     <string name="msg_channel">新消息</string>
     <string name="msg_channel_desc">收到新消息时提醒（含提示音与震动）</string>
     <string name="notif_new_message">新消息</string>

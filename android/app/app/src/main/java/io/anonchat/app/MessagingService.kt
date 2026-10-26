@@ -198,17 +198,16 @@ class MessagingService : Service() {
      * 恢复后切回电池提示——不新增通知渠道、天然去抖（只在状态翻转时变化）。
      * 用户对"中继挂了"原本完全无感知，表现为"看似在线、永远收不到"。
      */
-    private fun updateForegroundNoti(relayDown: Boolean) {
+    private fun updateForegroundNoti(relayDown: Boolean, storageBad: Boolean = false) {
         val pi = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        val text = if (relayDown) {
-            getString(R.string.msg_svc_text_relay_down)
-        } else if (BatteryOpt.isIgnoring(this)) {
-            getString(R.string.msg_svc_text_ok)
-        } else {
-            getString(R.string.msg_svc_text_battery)
+        val text = when {
+            storageBad -> getString(R.string.msg_svc_text_storage_bad)
+            relayDown -> getString(R.string.msg_svc_text_relay_down)
+            BatteryOpt.isIgnoring(this) -> getString(R.string.msg_svc_text_ok)
+            else -> getString(R.string.msg_svc_text_battery)
         }
         val noti: Notification = Notification.Builder(this, ensureChannel())
             .setContentTitle(getString(R.string.msg_svc_title))
@@ -269,6 +268,7 @@ class MessagingService : Service() {
         var backoff = 2_000L
         var failStreak = 0
         var notifRelayDown = false
+        var notifStorageBad = false
         while (scope.isActive && running) {
             // 循环体整体兜住异常：任何一次未捕获的异常都会让协程结束，
             // 而服务还"活着"、loopJob 也不为 null，于是再也不会重试 —— 表现为永久静默。
@@ -282,7 +282,20 @@ class MessagingService : Service() {
             // 无论这轮成功与否都要把 Rust 侧攒下的告警取出来。
             // 原来只在成功分支里取，于是"一直连不上中继"这种持续失败状态下
             // 告警全堆在队列里（上限 32 条后被挤掉），logcat 里一条都看不到。
-            Repo.drainWarnings().forEach { Log.w(TAG, "core warning: $it") }
+            var storageBad = false
+            Repo.drainWarnings().forEach {
+                Log.w(TAG, "core warning: $it")
+                // 本地存储写不进去（磁盘满等）必须让用户看见：内存已改、日志
+                // 没写，重启后消息就消失了，而 logcat 没人看（P3）。
+                if (it.contains("本地存储")) storageBad = true
+            }
+            if (storageBad && !notifStorageBad) {
+                notifStorageBad = true
+                updateForegroundNoti(relayDown = false, storageBad = true)
+            } else if (!storageBad && notifStorageBad) {
+                notifStorageBad = false
+                updateForegroundNoti(relayDown = false, storageBad = false)
+            }
             if (res.ok) {
                 backoff = 2_000L
                 failStreak = 0

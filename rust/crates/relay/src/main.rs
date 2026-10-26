@@ -96,7 +96,7 @@ struct Queue {
 struct State {
     queues: HashMap<String, Queue>,
     /// 每个队列当前在线的订阅者。连接断开时必须清理，否则内存泄漏。
-    subs: HashMap<String, Vec<mpsc::UnboundedSender<ServerFrame>>>,
+    subs: HashMap<String, Vec<mpsc::Sender<ServerFrame>>>,
     log: Log,
     /// 每连接每分钟最多投递多少条。0 = 不限制（仅测试用）
     rate_limit: u32,
@@ -137,6 +137,14 @@ impl State {
 
 static LIVE_CONNS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_CONNS: AtomicU64 = AtomicU64::new(0);
+
+/// 每连接的出站缓冲上限。
+///
+/// 早先是无界 channel：订阅者建立连接后不读 TCP（writer 卡在 sink.send），
+/// 其 rx 会无上限增长——限速只约束灌入速率、不约束总量，配合"先存后推"
+/// 就是一条真实的服务端内存增长路径（P3）。满了丢帧即可：客户端重连后
+/// 由 Sub 补投积压，服务端不为慢消费者无限买单。
+const SUB_QUEUE_BUF: usize = 1024;
 
 async fn serve(args: &[String]) -> Result<()> {
     let addr: SocketAddr = opt(args, "--addr")
@@ -328,7 +336,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
     let (mut sink, mut src) = ws.split();
 
     // 出站队列：回复、订阅推送都走这里，避免在持锁时 await 网络
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerFrame>();
+    let (tx, mut rx) = mpsc::channel::<ServerFrame>(SUB_QUEUE_BUF);
 
     let writer = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
@@ -366,7 +374,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
             Ok(t) => t,
             Err(_) => {
                 // 二进制帧阶段 0 不支持
-                let _ = tx.send(ServerFrame::err("bad_frame", "仅支持文本 JSON 帧"));
+                let _ = tx.try_send(ServerFrame::err("bad_frame", "仅支持文本 JSON 帧"));
                 continue;
             }
         };
@@ -374,7 +382,10 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
         let frame: ClientFrame = match serde_json::from_str(text) {
             Ok(f) => f,
             Err(e) => {
-                let _ = tx.send(ServerFrame::err("bad_json", e.to_string()));
+                // serde 的英文报错只进服务端日志：错误码体系其余文案都是中文，
+                // 客户端若原样展示会风格割裂且对用户不可懂（P3）。
+                eprintln!("[relay] bad_json: {e}");
+                let _ = tx.try_send(ServerFrame::err("bad_json", "请求帧格式无法解析"));
                 continue;
             }
         };
@@ -383,14 +394,25 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
         // 一条 Put 携带 16MB 的 id 就能在"合法速率"内灌盘灌内存（二轮审计 P2-3）。
         // qid 恒为 32 hex、id 恒为 32 hex（proto 生成），超长的一律 bad_frame。
         if !frame.check_sizes() {
-            let _ = tx.send(ServerFrame::err("bad_frame", "字段长度不合法"));
+            let _ = tx.try_send(ServerFrame::err("bad_frame", "字段长度不合法"));
             continue;
         }
 
         match frame {
             ClientFrame::New { v } => {
                 if v != PROTOCOL_VERSION {
-                    let _ = tx.send(ServerFrame::err("bad_version", format!("需要 v{PROTOCOL_VERSION}")));
+                    let _ = tx.try_send(ServerFrame::err("bad_version", format!("需要 v{PROTOCOL_VERSION}")));
+                    continue;
+                }
+                // 持久化降级时拒绝新建队列：此刻收下的队列只在内存里，
+                // 重启即消失——与其让用户以为有了信箱，不如让他换一台中继。
+                // 注意 guard 必须在独立块里释放，否则后面的 state.lock() 会死锁。
+                let degraded = { state.lock().await.log.degraded() };
+                if degraded {
+                    let _ = tx.try_send(ServerFrame::err(
+                        "storage_degraded",
+                        "这台中继的磁盘写入异常，请换一台中继",
+                    ));
                     continue;
                 }
                 // 建队列与投递共用同一速率窗口：每个 New 都会写一行 30 天 TTL 的
@@ -402,7 +424,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                         puts_in_window = 0;
                     }
                     if puts_in_window >= rate_limit {
-                        let _ = tx.send(ServerFrame::err(
+                        let _ = tx.try_send(ServerFrame::err(
                             "rate_limited",
                             format!("超过速率限制（{rate_limit} 条/分钟），请稍后重试"),
                         ));
@@ -426,7 +448,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                     eprintln!("[relay] 持久化失败（建队列 {qid}）: {e:#}");
                 }
                 drop(st);
-                let _ = tx.send(ServerFrame::NewOk {
+                let _ = tx.try_send(ServerFrame::NewOk {
                     qid,
                     ttl: QUEUE_TTL_SECS,
                 });
@@ -439,7 +461,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                 // 通道，不清没有对应队列的条目）。合法流程 New 必然先于 Sub。
                 if !st.queues.contains_key(&qid) {
                     drop(st);
-                    let _ = tx.send(ServerFrame::err("no_queue", "队列不存在或已过期"));
+                    let _ = tx.try_send(ServerFrame::err("no_queue", "队列不存在或已过期"));
                     continue;
                 }
                 // 同连接对同队列重复 Sub：只注册一次。重复注册的话之后每条
@@ -452,12 +474,12 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                 // 先回确认，再补投积压。
                 // 顺序不能反：积压不为空时若跳过 OK 直接推 Msg，客户端在等
                 // "订阅确认"时会把第一条消息当成确认帧吞掉，那条消息就永久丢了。
-                let _ = tx.send(ServerFrame::Ok {
+                let _ = tx.try_send(ServerFrame::Ok {
                     ref_id: format!("sub:{qid}"),
                 });
                 if let Some(q) = st.queues.get(&qid) {
                     for m in &q.msgs {
-                        let _ = tx.send(ServerFrame::Msg {
+                        let _ = tx.try_send(ServerFrame::Msg {
                             qid: qid.clone(),
                             id: m.id.clone(),
                             body: m.body.clone(),
@@ -475,7 +497,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                         puts_in_window = 0;
                     }
                     if puts_in_window >= rate_limit {
-                        let _ = tx.send(ServerFrame::err(
+                        let _ = tx.try_send(ServerFrame::err(
                             "rate_limited",
                             format!("超过速率限制（{rate_limit} 条/分钟），请稍后重试"),
                         ));
@@ -484,13 +506,13 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                     puts_in_window += 1;
                 }
                 if body.len() > MAX_BODY_LEN {
-                    let _ = tx.send(ServerFrame::err("too_large", "消息体超过 64KiB"));
+                    let _ = tx.try_send(ServerFrame::err("too_large", "消息体超过 64KiB"));
                     continue;
                 }
                 let mut st = state.lock().await;
                 if !st.queues.contains_key(&qid) {
                     drop(st);
-                    let _ = tx.send(ServerFrame::err("no_queue", "队列不存在或已过期"));
+                    let _ = tx.try_send(ServerFrame::err("no_queue", "队列不存在或已过期"));
                     continue;
                 }
 
@@ -524,12 +546,12 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                     };
                     if let Some(subs) = st.subs.get(&qid) {
                         for s in subs {
-                            let _ = s.send(msg.clone());
+                            let _ = s.try_send(msg.clone());
                         }
                     }
                 }
                 drop(st);
-                let _ = tx.send(ServerFrame::Ok { ref_id: id });
+                let _ = tx.try_send(ServerFrame::Ok { ref_id: id });
             }
 
             ClientFrame::Get { qid } => {
@@ -537,7 +559,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                 match st.queues.get(&qid) {
                     Some(q) => {
                         for m in &q.msgs {
-                            let _ = tx.send(ServerFrame::Msg {
+                            let _ = tx.try_send(ServerFrame::Msg {
                                 qid: qid.clone(),
                                 id: m.id.clone(),
                                 body: m.body.clone(),
@@ -546,7 +568,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                         }
                     }
                     None => {
-                        let _ = tx.send(ServerFrame::err("no_queue", "队列不存在或已过期"));
+                        let _ = tx.try_send(ServerFrame::err("no_queue", "队列不存在或已过期"));
                     }
                 }
             }
@@ -561,7 +583,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                         puts_in_window = 0;
                     }
                     if puts_in_window >= rate_limit {
-                        let _ = tx.send(ServerFrame::err(
+                        let _ = tx.try_send(ServerFrame::err(
                             "rate_limited",
                             format!("超过速率限制（{rate_limit} 条/分钟），请稍后重试"),
                         ));
@@ -573,7 +595,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                 // 也让下面的 retain 退化为 O(消息数×ids数)。64 远超正常客户端
                 // 的单批确认量（分批 ack 是客户端既有行为）。
                 if ids.len() > 64 {
-                    let _ = tx.send(ServerFrame::err("bad_frame", "ack 一次最多确认 64 条"));
+                    let _ = tx.try_send(ServerFrame::err("bad_frame", "ack 一次最多确认 64 条"));
                     continue;
                 }
                 let mut st = state.lock().await;
@@ -587,11 +609,11 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                     }
                 }
                 drop(st);
-                let _ = tx.send(ServerFrame::Ok { ref_id: "ack".into() });
+                let _ = tx.try_send(ServerFrame::Ok { ref_id: "ack".into() });
             }
 
             ClientFrame::Ping => {
-                let _ = tx.send(ServerFrame::Pong);
+                let _ = tx.try_send(ServerFrame::Pong);
             }
 
             // 通话前索取 TURN 临时凭据。
@@ -607,7 +629,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                         puts_in_window = 0;
                     }
                     if puts_in_window >= rate_limit {
-                        let _ = tx.send(ServerFrame::err(
+                        let _ = tx.try_send(ServerFrame::err(
                             "rate_limited",
                             format!("超过速率限制（{rate_limit} 条/分钟），请稍后重试"),
                         ));
@@ -623,7 +645,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                     Some(url) => {
                         let (user, pass, expires) = turn::auth::issue_ephemeral(3600);
                         let ttl = expires.saturating_sub(proto::now_secs());
-                        let _ = tx.send(ServerFrame::TurnCreds {
+                        let _ = tx.try_send(ServerFrame::TurnCreds {
                             url,
                             user,
                             pass,
@@ -632,7 +654,7 @@ async fn handle_conn(stream: TcpStream, state: Arc<Mutex<State>>, peer: SocketAd
                     }
                     // 没开 TURN：明确告诉客户端"别指望我"，让它回退到自填配置
                     None => {
-                        let _ = tx.send(ServerFrame::err(
+                        let _ = tx.try_send(ServerFrame::err(
                             "no_turn",
                             "这个中继没有开启 TURN",
                         ));

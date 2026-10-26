@@ -353,8 +353,12 @@ object Repo {
         synchronized(msgLock) {
             peerCards.forEach { (k, card) ->
                 if (card.dh.isNotBlank()) {
-                    map[k] = card.dh
-                    if (card.name.isNotBlank()) map[card.name] = card.dh
+                    // 联系人优先：陌生人的自报名与某个联系人显示名相同时
+                    // （昵称重名很常见），后者不能覆盖前者——否则存量"名字键"
+                    // 会话会被迁到错误的人名下（P3）。putIfAbsent 保证先写入的
+                    // 联系人映射获胜。
+                    map.putIfAbsent(k, card.dh)
+                    if (card.name.isNotBlank()) map.putIfAbsent(card.name, card.dh)
                 }
             }
         }
@@ -1047,6 +1051,18 @@ object Repo {
         }
         onProgress(sent, size)
 
+        // 文件在"选取 → 发送"之间被截断/改小：total 是按声明 size 算的，
+        // 实际发出去的块少于 total，接收端 got 永远到不了 total（靠 5 分钟
+        // 超时自愈清理，但用户会看到一条"卡住又消失"的进度）。这里直接报错，
+        // 发送方不留"看起来发过"的本地记录（P3）。
+        if (sent != size) {
+            keepFile.delete()
+            return Res(
+                null,
+                err = AppError(ErrKind.FILE_SEND_FAILED, "文件在发送过程中被修改（$sent/$size 字节）")
+            )
+        }
+
         val summary = blobSummary(
             fid, name, sent, keepFile.absolutePath, null, kind, durMs, width, height, burn
         ).toString()
@@ -1473,8 +1489,11 @@ object Repo {
     private fun rememberCard(conv: String, inc: Incoming) {
         val qid = inc.replyQid ?: return
         if (inc.replyRelays.isEmpty()) return
+        // 对方没自报昵称时的兜底名：conv 现在是 dh（0.12.0 起），removePrefix
+        // 是名字键时代的遗物、对 dh 不命中，会把整串 64 位哈希当名字显示在
+        // 列表和聊天页标题上（P3）。取前 8 位，与陌生人会话的显示规则一致。
         val card = PeerCard(
-            name = inc.selfName?.takeIf { it.isNotBlank() } ?: conv.removePrefix("陌生人 "),
+            name = inc.selfName?.takeIf { it.isNotBlank() } ?: conv.take(8),
             pk = inc.fromId,
             dh = inc.dh,
             qid = qid,

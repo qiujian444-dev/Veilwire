@@ -129,7 +129,7 @@ async fn handle_client(
         (method::BINDING, class::REQUEST) => {
             let mut resp = Msg::new(method::BINDING, class::SUCCESS, msg.tid);
             resp.add_xor_addr(attr::XOR_MAPPED_ADDRESS, from);
-            resp.add_xor_addr(attr::MAPPED_ADDRESS, from); // 老客户端兼容
+            resp.add_plain_addr(attr::MAPPED_ADDRESS, from); // 老客户端兼容（明文，RFC 5389 §15.1）
             resp.add_str(attr::SOFTWARE, SOFTWARE);
             let _ = sock.send_to(&resp.encode(None, true), from).await;
         }

@@ -48,6 +48,8 @@ pub struct Log {
     /// 本次启动后追加的字节数，用于判断是否需要 compact
     appended: u64,
     fsync: bool,
+    /// 持久化已降级（写不进去）。只在状态翻转时打日志，避免刷屏。
+    degraded: bool,
 }
 
 /// 重放结果
@@ -82,6 +84,7 @@ impl Log {
                 file: Some(file),
                 appended: 0,
                 fsync,
+                degraded: false,
             },
             Loaded {
                 queues,
@@ -97,6 +100,7 @@ impl Log {
             file: None,
             appended: 0,
             fsync: false,
+            degraded: false,
         }
     }
 
@@ -128,22 +132,44 @@ impl Log {
     }
 
     fn write(&mut self, rec: &Record) -> Result<()> {
-        let Some(file) = self.file.as_mut() else {
-            return Ok(()); // 内存模式
-        };
+        // 无句柄时区分两种情况：内存模式（测试，path 为空）直接成功；
+        // 磁盘模式则尝试重开一次——compact 换文件或 IO 抖动可能留下 None，
+        // 自愈在这里做，避免一次失败就永久静默丢弃（二轮审计 P2-1）。
+        if self.file.is_none() {
+            if self.path.as_os_str().is_empty() {
+                return Ok(()); // 内存模式
+            }
+            self.reopen_after_compact();
+            if self.file.is_none() {
+                self.mark_degraded("写入失败且无法重开日志");
+                anyhow::bail!("日志句柄不可用");
+            }
+            self.degraded = false;
+        }
+        let file = self.file.as_mut().expect("上面已确保存在");
         let mut line = serde_json::to_string(rec).context("记录序列化失败")?;
         line.push('\n');
-        file.write_all(line.as_bytes()).context("写入日志失败")?;
-        if self.fsync {
-            file.sync_data().context("fsync 失败")?;
+        if let Err(e) = file.write_all(line.as_bytes()) {
+            // 写失败（磁盘满/IO 错误）：标记降级、丢弃句柄让下次自愈重试
+            self.file = None;
+            self.mark_degraded(&format!("写入日志失败: {e}"));
+            return Err(e).context("写入日志失败");
         }
+        if self.fsync {
+            if let Err(e) = file.sync_data() {
+                self.mark_degraded(&format!("fsync 失败: {e}"));
+                return Err(e).context("fsync 失败");
+            }
+        }
+        self.degraded = false;
         self.appended += line.len() as u64;
         Ok(())
     }
 
     /// 是否值得压缩：本次追加量超过"有效数据量"的两倍，说明里面大多是已 ack 的垃圾。
     pub fn should_compact(&self, queues: &HashMap<String, Queue>) -> bool {
-        if self.file.is_none() {
+        // 降级中不压缩：磁盘写不进去时重写只会再失败一次
+        if self.file.is_none() || self.degraded {
             return false;
         }
         let live = live_entry_count(queues) as u64;
@@ -155,14 +181,21 @@ impl Log {
     ///
     /// 为什么先写临时文件再 rename：rename 在同一文件系统上是原子的，
     /// 中途崩溃要么是旧文件、要么是新文件，不会出现半截日志。
+    ///
+    /// **失败绝不能自毁句柄**：早先一进来就 `self.file = None`，之后任何一步
+    /// 失败（创建 tmp / sync / rename / 重开）都会带着 None 返回——此后所有
+    /// `append_*` 走内存模式的 `return Ok(())`，成功假象、`should_compact`
+    /// 也因 `file.is_none()` 永远不再尝试。一次磁盘抖动就把持久化静默降级
+    /// 到进程结束（二轮审计 P2-1）。
+    /// 现在：先完整写好 tmp（全程不碰旧句柄），只在 rename 前后短暂关闭，
+    /// 无论成败都尝试重开。
     pub fn compact(&mut self, queues: &HashMap<String, Queue>) -> Result<()> {
         if self.file.is_none() {
             return Ok(());
         }
-        // 先关掉句柄，否则 Windows 上 rename 会失败
-        self.file = None;
-
         let tmp = self.path.with_extension("log.tmp");
+
+        // ① 写出完整新日志（旧句柄仍在，失败时连 append 都不受影响）
         {
             let mut f = File::create(&tmp).context("创建临时日志失败")?;
             for (qid, q) in queues {
@@ -184,11 +217,48 @@ impl Log {
             f.sync_all().context("临时日志落盘失败")?;
         }
 
-        std::fs::rename(&tmp, &self.path).context("替换日志失败")?;
+        // ② 关句柄 → rename（Windows 上句柄未关会失败）
+        self.file = None;
+        let renamed = std::fs::rename(&tmp, &self.path);
+        if let Err(e) = &renamed {
+            // rename 失败：原文件还在，tmp 清掉即可
+            let _ = std::fs::remove_file(&tmp);
+            self.reopen_after_compact();
+            self.degraded = false;
+            return Err(anyhow::anyhow!("替换日志失败: {e}"));
+        }
 
-        self.file = Some(OpenOptions::new().append(true).open(&self.path)?);
+        // ③ 重开。失败也只是一次退化，下次 append 会再试自愈
+        self.reopen_after_compact();
+        if self.file.is_none() {
+            self.mark_degraded("compact 后重开日志失败");
+            return Err(anyhow::anyhow!("重开日志失败"));
+        }
         self.appended = 0;
+        self.degraded = false;
         Ok(())
+    }
+
+    /// compact 前后统一的重开入口。失败时留 None，由 `write` 的自愈路径兜底。
+    fn reopen_after_compact(&mut self) {
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
+        if let Ok(f) = OpenOptions::new().create(true).append(true).open(&self.path) {
+            self.file = Some(f);
+        }
+    }
+
+    /// 持久化是否已降级（写不进去）。服务端据此拒绝新建队列，避免"收下了但重启就没了"。
+    pub fn degraded(&self) -> bool {
+        self.degraded
+    }
+
+    fn mark_degraded(&mut self, why: &str) {
+        if !self.degraded {
+            self.degraded = true;
+            eprintln!("[storage] 持久化降级，重启将丢失此后写入: {why}");
+        }
     }
 }
 
