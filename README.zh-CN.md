@@ -43,10 +43,18 @@
 （二进制一旦进了 git 历史就删不掉，只能重写历史）。发布都放在
 [Releases](https://github.com/qiujian444-dev/Veilwire/releases)。
 
+最新版直链（这两条永远指向最新发布，不用管版本号）：
+
+- **arm64**（绝大多数手机）— <https://github.com/qiujian444-dev/Veilwire/releases/latest/download/veilwire-arm64.apk>
+- **x86_64**（模拟器）— <https://github.com/qiujian444-dev/Veilwire/releases/latest/download/veilwire-x86_64.apk>
+
+想钉死某个版本就用固定直链：`.../releases/download/v<版本>/veilwire-<版本>-arm64.apk`。
+
 | 文件 | 用途 |
 |---|---|
 | `veilwire-<版本>-arm64.apk` | 真机（Android 8.0+，arm64） |
 | `veilwire-<版本>-x86_64.apk` | 模拟器（x86_64） |
+| `veilwire-arm64.apk` / `veilwire-x86_64.apk` | 同上的副本，文件名不含版本号 —— `latest/download` 直链解析的就是它们 |
 | `SHA256SUMS` | 校验和 |
 | `BUILD-INFO.txt` | 构建元数据（commit、工具链版本、签名证书） |
 

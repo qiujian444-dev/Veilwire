@@ -53,6 +53,12 @@ echo "==> 3/6 归档产物与校验和"
 mkdir -p "$OUT"
 cp "$ROOT/dist/anonchat-arm64-release.apk"  "$OUT/veilwire-$VERSION-arm64.apk"
 cp "$ROOT/dist/anonchat-x86_64-release.apk" "$OUT/veilwire-$VERSION-x86_64.apk"
+# 再放一份不带版本号的副本。GitHub 的 releases/latest/download/<资产名> 是按
+# **文件名**解析的：只传带版本号的包就没有稳定的"最新版"直链。
+# 代价是每个 Release 多存一份（约 53MB），换来一条能写死在 README 里、
+# 长期有效的下载地址。
+cp "$OUT/veilwire-$VERSION-arm64.apk"  "$OUT/veilwire-arm64.apk"
+cp "$OUT/veilwire-$VERSION-x86_64.apk" "$OUT/veilwire-x86_64.apk"
 (
   cd "$OUT"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -110,16 +116,21 @@ if command -v gh >/dev/null 2>&1; then
   gh release create "$TAG" \
     "$OUT/veilwire-$VERSION-arm64.apk" \
     "$OUT/veilwire-$VERSION-x86_64.apk" \
+    "$OUT/veilwire-arm64.apk" \
+    "$OUT/veilwire-x86_64.apk" \
     "$OUT/SHA256SUMS" \
     "$OUT/BUILD-INFO.txt" \
     --title "Veilwire $VERSION" \
-    --notes "见 README 的更新说明。校验：sha256sum -c SHA256SUMS"
+    --notes "见 CHANGELOG.md 与 README。校验：sha256sum -c SHA256SUMS"
 else
-  echo "    没装 GitHub CLI，手动上传这三个文件到 tag $TAG 的 Release："
+  echo "    没装 GitHub CLI，手动上传这些文件到 tag $TAG 的 Release："
   ls -1 "$OUT"
   echo "    或用：gh release create $TAG <assets...> --title \"Veilwire $VERSION\""
 fi
 
 echo
-echo "完成。下载直链（最新版永远指向这个）："
-echo "  https://github.com/<owner>/<repo>/releases/latest/download/veilwire-$VERSION-arm64.apk"
+echo "完成。稳定下载直链（永远指向最新版，因为文件名不含版本号）："
+echo "  https://github.com/<owner>/<repo>/releases/latest/download/veilwire-arm64.apk"
+echo "  https://github.com/<owner>/<repo>/releases/latest/download/veilwire-x86_64.apk"
+echo "本次版本的固定直链（不随新版本变化）："
+echo "  https://github.com/<owner>/<repo>/releases/download/$TAG/veilwire-$VERSION-arm64.apk"

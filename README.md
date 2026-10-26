@@ -24,10 +24,19 @@ directory to take down.
 clone and could never be cleaned up. Releases live on the
 [Releases](https://github.com/qiujian444-dev/Veilwire/releases) page.
 
+Latest build (these URLs always point at the newest release):
+
+- **arm64** (most phones) — <https://github.com/qiujian444-dev/Veilwire/releases/latest/download/veilwire-arm64.apk>
+- **x86_64** (emulators) — <https://github.com/qiujian444-dev/Veilwire/releases/latest/download/veilwire-x86_64.apk>
+
+Pinned to a specific version instead? Use
+`.../releases/download/v<version>/veilwire-<version>-arm64.apk`.
+
 | File | Purpose |
 |---|---|
 | `veilwire-<version>-arm64.apk` | Real devices (Android 8.0+, arm64) |
 | `veilwire-<version>-x86_64.apk` | Emulators (x86_64) |
+| `veilwire-arm64.apk` / `veilwire-x86_64.apk` | Same files, no version in the name — this is what the `latest/download` links resolve to |
 | `SHA256SUMS` | Checksums |
 | `BUILD-INFO.txt` | Build metadata (commit, toolchain versions, signing certificate) |
 
