@@ -170,6 +170,8 @@
     <string name="settings_switch_body">Your inbox queue and every contact\'s relay will move to the new address.\n\nNote: messages not yet delivered on the old relay WILL NOT migrate — the other side has to send them again.\n\nThe other side also needs to be able to reach this relay, or nothing can be sent between you.</string>
     <string name="settings_switch_verifying">Verifying the new relay…</string>
     <string name="settings_switch_done">Relay switched</string>
+    <string name="settings_switch_notified_all">Relay switched. All %1$d contacts were told your new address.</string>
+    <string name="settings_switch_notified_partial">Relay switched. %1$d of %2$d contacts were told; the rest will be retried automatically once their relay is reachable.</string>
     <string name="settings_switch_failed">Switch failed: %1$s</string>
     <string name="settings_switch_action">Switch</string>
     <string name="settings_unknown_error">unknown error</string>

@@ -929,6 +929,10 @@ private fun ChatsTab(
                         ?: stringResource(R.string.chats_no_messages),
                     highlight = lastMsgs[c.dh] != null,
                     unread = unreadMap[c.dh] ?: 0,
+                    // 列表每秒会重组（见 ChatsTab 的秒级清扫），这里直接算，
+                    // 不需要再挂一个 ticker
+                    active = c.lastSeen > 0 &&
+                        System.currentTimeMillis() / 1000 - c.lastSeen <= 300,
                     onClick = { onOpenChat(c.dh) },
                     onLongClick = { manageKey = c.dh },
                 )
@@ -1238,6 +1242,8 @@ private fun ContactRow(
     sub: String,
     highlight: Boolean = false,
     unread: Int = 0,
+    /** 最近 5 分钟内收到过对方的东西（本地推断，不是"现在在线"） */
+    active: Boolean = false,
     onClick: () -> Unit,
     /** 长按打开管理菜单（备注名 / 删记录 / 删联系人） */
     onLongClick: (() -> Unit)? = null,
@@ -1257,7 +1263,17 @@ private fun ContactRow(
             Avatar(name, 42.dp)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(name, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        name, fontWeight = FontWeight.Medium, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (active) {
+                        Spacer(Modifier.width(6.dp))
+                        Box(Modifier.size(7.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+                    }
+                }
                 Text(
                     sub,
                     style = MaterialTheme.typography.bodySmall,
@@ -1534,7 +1550,17 @@ private fun SettingsTab(
                                 relayBusy = false
                                 pendingRelay = null
                                 if (r.ok) {
-                                    saved = ctx.getString(R.string.settings_switch_done)
+                                    // 通知到几个人必须说出来：用户以为"切完了"，
+                                    // 实际可能有联系人（中继当时挂了）还没收到新地址，
+                                    // 他之后发的东西会一直堆在废弃队列上。
+                                    val st = r.data
+                                    val got = st?.notified ?: 0
+                                    val total = st?.total ?: 0
+                                    saved = when {
+                                        total <= 0 -> ctx.getString(R.string.settings_switch_done)
+                                        got >= total -> ctx.getString(R.string.settings_switch_notified_all, got)
+                                        else -> ctx.getString(R.string.settings_switch_notified_partial, got, total)
+                                    }
                                     relay = target
                                     onChanged()
                                 } else {
@@ -2000,6 +2026,7 @@ private fun ChatTopBar(
     verified: Boolean,
     canCall: Boolean,
     panicCode: String?,
+    active: Boolean = false,
     onBack: () -> Unit,
     onSafety: () -> Unit,
     onCall: (video: Boolean) -> Unit,
@@ -2037,6 +2064,14 @@ private fun ChatTopBar(
             if (verified) {
                 Spacer(Modifier.width(4.dp))
                 Text("✓", fontSize = 12.sp, color = skin.accent)
+            }
+            // 最近活跃：绿点。只能表示"最近 5 分钟内收到过他的东西"，
+            // 不代表"现在在线"——后者必须问中继，那会把关系图交出去。
+            if (active) {
+                Spacer(Modifier.width(6.dp))
+                Box(
+                    Modifier.size(7.dp).background(skin.accent, CircleShape)
+                )
             }
         }
         Box(contentAlignment = Alignment.Center) {
@@ -2133,6 +2168,15 @@ private fun ChatScreen(
     var burnOpt by remember { mutableStateOf(0L) }
     // 焚毁倒计时每秒走一格；只在会话里真有焚毁消息时才跑这个循环
     var burnTick by remember(peer) { mutableStateOf(0) }
+    // 对方的"最近活跃"时间（本地记录，见 Contact.lastSeen）。
+    // 15 秒刷新一次就够：阈值是 5 分钟，没必要每秒查存储。
+    var peerLastSeen by remember(peer) { mutableStateOf(0L) }
+    LaunchedEffect(peer) {
+        while (true) {
+            peerLastSeen = withContext(Dispatchers.IO) { Repo.lastSeenOf(peer) }
+            delay(15_000)
+        }
+    }
     // 正在全屏查看的图片/视频。放在页面这一层：气泡会被 LazyColumn 回收，
     // 对话框状态塞在 item 里滚一下就没了
     var mediaView by remember(peer) { mutableStateOf<MediaBubble?>(null) }
@@ -2695,6 +2739,9 @@ private fun ChatScreen(
                 verified = verifiedBadge,
                 canCall = isContact,
                 panicCode = panicCode,
+                // 5 分钟内收到过他的任何帧就算"最近活跃"（见 Contact.lastSeen）
+                active = peerLastSeen > 0 &&
+                    System.currentTimeMillis() / 1000 - peerLastSeen <= 300,
                 onBack = onBack,
                 onSafety = { showSafety = true },
                 onCall = { video -> onStartCall(peer, video) },
@@ -3724,12 +3771,26 @@ private fun Bubble(
                     .pointerInput(m.text) { detectTapGestures(onLongPress = { menu = true }) }
                     .padding(horizontal = SkinDims.bubblePadH + 2.dp, vertical = SkinDims.bubblePadV + 2.dp)
             ) {
-                Text(
-                    m.text,
-                    fontSize = 16.sp,
-                    lineHeight = 23.sp,
-                    color = skin.bubbleText,
-                )
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        m.text,
+                        fontSize = 16.sp,
+                        lineHeight = 23.sp,
+                        color = skin.bubbleText,
+                    )
+                    // 送达状态：单勾 = 已投递到对方中继，双勾 = 对方设备已确认。
+                    // 只在自己发的文字消息上显示——文件/语音/图片没有回执链路，
+                    // 硬画一个勾会误导用户（"已发出"被看成"已送达"）。
+                    if (m.outgoing && m.kind == "text" && !m.failed && m.rid.isNotBlank()) {
+                        Text(
+                            if (m.delivered) "✓✓" else "✓",
+                            fontSize = 11.sp,
+                            color = if (m.delivered) skin.bubbleText.copy(alpha = 0.85f)
+                            else skin.bubbleText.copy(alpha = 0.45f),
+                            modifier = Modifier.padding(top = 1.dp),
+                        )
+                    }
+                }
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(

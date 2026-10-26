@@ -85,8 +85,17 @@ fn recv_incoming(dir: &str, want: &str, secs: u64) -> Option<client::Incoming> {
 }
 
 /// 只有身份、没有队列的设备发消息时，必须自动补队列并带上线索。
+/// 这些用例各自会真起 relay 进程，而 `free_port()` 是"绑一下再放开"的，
+/// 并发跑时两个用例可能抢到同一个端口（TOCTOU），表现为随机失败。
+/// 用进程内互斥把它们串起来——比引入 `serial_test` 依赖轻。
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn sender_without_queue_still_leaves_reply_clue() {
+    let _serial = serial();
     let r1 = start_relay("a");
     let da = tmpdir("alice"); // 有队列的正常设备
     let db = tmpdir("bob"); // 只有身份，从不生成邀请码
@@ -150,6 +159,7 @@ fn sender_without_queue_still_leaves_reply_clue() {
 /// 里是个连不上的地址；而消息能发出去，说明对方的中继此刻是通的。
 #[test]
 fn dead_own_relay_falls_back_to_peers_relay() {
+    let _serial = serial();
     let r1 = start_relay("a");
     let da = tmpdir("alice");
     let db = tmpdir("bob");

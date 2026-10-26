@@ -16,10 +16,19 @@ data class Contact(
     val qid: String,
     /** 本机备注名（只在本人设备上生效）。空串 = 用对方自己的昵称 */
     val alias: String = "",
+    /**
+     * 最近一次收到对方任何东西的本地时间（秒，0 = 从没收到）。
+     * 只能推出"最近活跃过"，推不出"现在在线"——后者要向中继查询，
+     * 那会把社交图谱交给运营者。
+     */
+    val lastSeen: Long = 0,
 ) {
     /** 界面上该显示的名字：备注优先 */
     val display: String get() = alias.ifBlank { name }
 }
+
+/** 换中继的结果：通知到几个 / 应该通知几个 */
+data class RelaySwitch(val notified: Int = 0, val total: Int = 0)
 
 data class Msg(
     val text: String,
@@ -60,6 +69,12 @@ data class Msg(
      * 必须落盘：App 被杀期间倒计时不能凭空重来，回放时读出来继续算。
      */
     val seenAt: Long = 0,
+    /**
+     * 对方设备已确认收到（双勾）。只有自己发的**文字**消息会点亮：
+     * 文件分块不回执（几百块逐块回执纯浪费），通话/撤回也不需要。
+     * 没点亮 = 单勾（已投递到对方中继）；failed = 感叹号（连中继都没投进去）。
+     */
+    val delivered: Boolean = false,
 ) {
     /**
      * 会话列表里那一行预览的**结构**（不是文案）。
@@ -396,14 +411,43 @@ object Repo {
      *
      * 旧中继队列里未 ack 的消息**不会迁移**，调用方需要先向用户确认。
      */
-    fun setRelay(ctx: Context, url: String): Res<Int> {
+    fun setRelay(ctx: Context, url: String): Res<RelaySwitch> {
         val (d, e) = envelope(Native.setRelay(dir, url.trim()))
         if (e == null) {
             relay = url.trim()
             ctx.getSharedPreferences("anon", Context.MODE_PRIVATE)
                 .edit().putString("relay", relay).apply()
         }
-        return Res((d as? Number)?.toInt(), e)
+        val o = d as? org.json.JSONObject
+        return Res(
+            o?.let { RelaySwitch(it.optInt("notified"), it.optInt("total")) },
+            e
+        )
+    }
+
+    /**
+     * 补发换中继通知。切换时对方中继可能正好不可达，那条通知会排队在
+     * `pending_routes.json` 里，由收消息循环定期重试——否则对方永远不知道
+     * 我的新地址，之后他一直往废弃队列发，两边都看不出问题。
+     */
+    fun flushPendingRoutes(): Int {
+        val (d, _) = envelope(Native.flushPendingRoutes(dir))
+        return (d as? Number)?.toInt() ?: 0
+    }
+
+    /** 把攒下的"已到达"回执发出去（对方拿它点亮双勾） */
+    fun flushReceipts(): Int {
+        val (d, _) = envelope(Native.flushReceipts(dir))
+        return (d as? Number)?.toInt() ?: 0
+    }
+
+    /**
+     * 对方确认收到（`rcpt` 回执）→ 把对应的自己发出的消息标为已送达。
+     * 返回点亮的条数（0 = 没有匹配的消息，无需刷新界面）。
+     */
+    fun markDelivered(peer: String, rids: List<String>): Int {
+        if (rids.isEmpty()) return 0
+        return store.markDelivered(peer, rids)
     }
 
     /** 删除联系人：Rust 侧删 contacts 条目 + Olm 会话；会话记录与文件副本由调用方另行清理 */
@@ -585,9 +629,13 @@ object Repo {
                 dh = o.optString("dh"),
                 qid = o.optString("qid"),
                 alias = o.optString("alias"),
+                lastSeen = o.optLong("last_seen"),
             )
         }
     }
+
+    /** 某联系人最近一次活跃的本地时间（0 = 从没收到过） */
+    fun lastSeenOf(dh: String): Long = contacts().firstOrNull { it.dh == dh }?.lastSeen ?: 0
 
     fun selfName(): String? {
         val (d, _) = envelope(Native.selfName(dir))

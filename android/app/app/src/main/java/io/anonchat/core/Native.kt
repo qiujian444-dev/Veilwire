@@ -51,6 +51,10 @@ object Native {
     external fun contacts(dir: String): String
     /** 切换中继：同步 self.relays 与所有联系人的 relays，连不上新中继会直接报错。返回受影响联系人数 */
     external fun setRelay(dir: String, url: String): String
+    /** 补发上次换中继没推成功的通知（对方中继当时不可达）。返回本次成功条数 */
+    external fun flushPendingRoutes(dir: String): String
+    /** 把攒下的送达回执发出去。返回发出的条数（0 = 没有待发或仍失败） */
+    external fun flushReceipts(dir: String): String
     /** 删除联系人（连带清 Olm 会话状态）。返回 [是否存在, 清掉的会话数] */
     external fun removeContact(dir: String, dh: String): String
     /** 设置联系人备注名，空串 = 清除 */

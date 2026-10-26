@@ -92,6 +92,8 @@ class MessagingService : Service() {
     private var onlineSince = 0L
     private var totalOnlineMs = 0L
     private var lastError: String? = null
+    /** 上次尝试补发换中继通知的时刻（elapsedRealtime，节流用） */
+    private var lastRouteFlush = 0L
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -299,6 +301,21 @@ class MessagingService : Service() {
             if (res.ok) {
                 backoff = 2_000L
                 failStreak = 0
+                // 换中继通知补发：能连上中继就说明网络可用，这时再试一次。
+                // 节流 60 秒——没待办时只是一次文件读，但没必要每 2 秒读一次。
+                val nowMs = SystemClock.elapsedRealtime()
+                if (nowMs - lastRouteFlush > 60_000L) {
+                    lastRouteFlush = nowMs
+                    try {
+                        val n = withContext(Dispatchers.IO) { Repo.flushPendingRoutes() }
+                        if (n > 0) Log.i(TAG, "resent $n pending relay-change notices")
+                        // 回执也要能重试：只在"收到新消息"时发的话，对话一停下来
+                        // 对方就永远停在单勾（他的中继当时可能正好抖动）。
+                        withContext(Dispatchers.IO) { Repo.flushReceipts() }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "flush pending routes failed", t)
+                    }
+                }
                 // 从"中继故障"状态恢复：把前台通知文案切回去
                 if (notifRelayDown) {
                     notifRelayDown = false
@@ -327,6 +344,18 @@ class MessagingService : Service() {
                         } else if (inc.isCall) {
                             // 通话信令：交给状态机 + WebRTC，不弹"新消息"通知
                             CallManager.onSignal(inc)
+                        } else if (inc.kind == "rcpt") {
+                            // 送达回执：对方确认收到我的消息 → 点亮双勾。
+                            // 不产生聊天记录、不算未读、不弹通知。
+                            val ids = runCatching {
+                                val a = org.json.JSONObject(inc.body ?: "{}").optJSONArray("ids")
+                                (0 until (a?.length() ?: 0)).mapNotNull { i -> a?.optString(i) }
+                            }.getOrDefault(emptyList())
+                            val n = Repo.markDelivered(inc.dh, ids)
+                            if (n > 0) {
+                                inboxTick += 1
+                                Log.i(TAG, "delivered: $n message(s) to ${inc.dh.take(8)}")
+                            }
                         } else if (inc.isBlob || inc.kind == "recall") {
                             // 文件/语音/图片/视频的**每个分块**都是一条独立消息，
                             // 20MB 文件 ≈ 854 块：不在这里计未读/弹通知（否则就是
@@ -340,6 +369,13 @@ class MessagingService : Service() {
                             notifyMessage(inc)
                         }
                         publish()
+                        // 收到消息就尽快把"已到达"回执发回去：对方才能及时看到双勾。
+                        // 攒着不发的话，对方要等到下次发消息才知道你收到了。
+                        try {
+                            withContext(Dispatchers.IO) { Repo.flushReceipts() }
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "flush receipts failed", t)
+                        }
                     }
                 } catch (t: Throwable) {
                     Log.e(TAG, "message handling failed", t)

@@ -21,7 +21,7 @@
 | Android 客户端 | Kotlin + Compose | `android/app/` | UI、通知、WebRTC、相册/相机、前台服务 |
 | 中继 | Rust（同一个 workspace） | `rust/crates/relay/` | 无标识队列 + 内嵌 TURN + DHT 自公布 |
 
-**当前版本**：`0.15.12` / `versionCode 39`（见 `android/app/app/build.gradle.kts`）
+**当前版本**：`0.15.13` / `versionCode 40`（见 `android/app/app/build.gradle.kts`）
 **协议版本**：`proto::PROTOCOL_VERSION`，改帧结构必须同时考虑旧客户端兼容性。
 
 ---
@@ -176,6 +176,31 @@ restart offer 一律拒**（`peer_gen < gen < self.gen` 的中间值曾从守卫
 `RECORD_AUDIO` 缺一不可），后台通话失去 while-in-use 豁免。日志里表现为
 `upgrade FGS type failed: ... is not a subset of ...`。
 
+### 4.5.3 控制帧：route / rcpt 的约定
+
+控制帧和普通消息走**同一条加密会话、同一个队列**，但在 Rust 层就地消费、
+不上浮成聊天记录。
+
+- **`route`（换中继通知）必须带 `seq`，接收端只认不早于本地的序号**
+  （`Contact.route_seq`）。无条件覆盖的话，迟到的旧帧/重投的旧帧会把地址改回
+  废弃队列——消息堆在那里没人取，双方界面还都显示正常（0.15.13 修）。
+  老版本指标（`seq == 0`）只在本地从未采纳过带序号的通知时才接受。
+- **`route` 推送失败必须排队重试**（`pending_routes.json` + `flush_pending_routes`）。
+  对方中继当时不可达不是"通知失败"，而是"晚点再通知"——丢掉就等于让对方
+  永远往死队列发。
+- **`rcpt`（送达回执）只对 `text` 发**。文件动辄几百块，逐块回执是纯浪费；
+  回执攒批（`pending_receipts.json`），由收消息循环在收到消息后与每 60 秒
+  各触发一次——只在收消息时发的话，对话一停对方就永远停在单勾。
+- **单勾 = 已投递到对方中继，双勾 = 对方设备已确认。** 不要给文件/语音也画勾：
+  它们没有回执链路，画了就是骗人。
+
+### 4.5.4 "在线"只能本地推断
+
+界面上的绿点表示"最近 5 分钟内收到过对方任何帧"（`Contact.last_seen`，
+接收路径上节流 30 秒落盘），**绝不向中继查询在线状态**：那等于把"谁在关注谁"
+的关系图交给运营者，与"中继只做加密转发"的前提冲突。
+要加更准的在线感知，先想清楚愿意付出多少元数据，再动代码。
+
 ### 4.6 信令的 API 边界：只透出"被接受"的 SDP
 
 `call_inbound` 组装 CallEvent 时，**offer 的 remote_sdp/video 只能在状态机
@@ -230,6 +255,7 @@ restart offer 一律拒**（`peer_gen < gen < self.gen` 的中间值曾从守卫
 | 加一个协议帧 | 改 `proto` 的 `ClientFrame`/`ServerFrame` → 中继处理 → client 调用 → **考虑旧客户端能不能解析**（serde 遇到未知 tag 直接失败） |
 | 改发送/路由 | 先读 4.2，改完跑 `relay_failover` / `cross_relay_routing` / `reply_clue` |
 | 改通话 | 改 `call.rs` 状态机要同步加单测；UI 侧看 `CallManager` 的 `ui` 状态；改完必读 4.5.1 / 4.5.2（显示名、覆盖层触摸、接听权限、FGS 类型） |
+| 加控制帧 / 改路由通知 | 先读 4.5.3（seq 单调、失败排队重试、回执只给文本） |
 | 改中继 | 注意数据目录兼容性（`queues.log` 回放），以及 TURN 的 SSRF 默认拒绝回环 |
 | 部署中继 | `docs/中继部署指南.md`；验证用 `scripts/relay_check.py <ip>:8080 --dht` |
 

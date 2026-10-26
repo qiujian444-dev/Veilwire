@@ -170,6 +170,8 @@
     <string name="settings_switch_body">切换后，你的收件队列和所有联系人的中继都会改到新地址。\n\n注意：旧中继上还没送达的消息不会迁移过来——对方重新发一次才收得到。\n\n对方也需要能连到这个中继，否则你们之间发不出消息。</string>
     <string name="settings_switch_verifying">正在验证新中继…</string>
     <string name="settings_switch_done">已切换中继</string>
+    <string name="settings_switch_notified_all">已切换中继，%1$d 位联系人都已收到你的新地址。</string>
+    <string name="settings_switch_notified_partial">已切换中继，%1$d/%2$d 位联系人已收到新地址；其余会在对方中继可达时自动补发。</string>
     <string name="settings_switch_failed">切换失败：%1$s</string>
     <string name="settings_switch_action">切换</string>
     <string name="settings_unknown_error">未知错误</string>

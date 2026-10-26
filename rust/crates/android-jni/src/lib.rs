@@ -258,6 +258,36 @@ pub extern "system" fn Java_io_anonchat_core_Native_recvOnce(
     })
 }
 
+/// 把攒下的送达回执发出去。返回发出的回执条数。
+#[no_mangle]
+pub extern "system" fn Java_io_anonchat_core_Native_flushReceipts(
+    mut env: JNIEnv,
+    _c: JClass,
+    dir: JString,
+) -> jstring {
+    let d = get_string(&mut env, &dir);
+    guard(&mut env, |_e| {
+        client::flush_receipts(&d)
+            .map(|n| json!(n))
+            .map_err(|e| format!("{e:#}"))
+    })
+}
+
+/// 补发之前没推成功的换中继通知。返回本次成功的条数。
+#[no_mangle]
+pub extern "system" fn Java_io_anonchat_core_Native_flushPendingRoutes(
+    mut env: JNIEnv,
+    _c: JClass,
+    dir: JString,
+) -> jstring {
+    let d = get_string(&mut env, &dir);
+    guard(&mut env, |_e| {
+        client::flush_pending_routes(&d)
+            .map(|n| json!(n))
+            .map_err(|e| format!("{e:#}"))
+    })
+}
+
 /// 切换中继：更新 self.relays 与所有联系人的 relays，连新中继验证通过才落盘。
 #[no_mangle]
 pub extern "system" fn Java_io_anonchat_core_Native_setRelay(
@@ -269,8 +299,8 @@ pub extern "system" fn Java_io_anonchat_core_Native_setRelay(
     let d = get_string(&mut env, &dir);
     let u = get_string(&mut env, &url);
     guard(&mut env, |_e| {
-        client::set_relay(&d, &u)
-            .map(|n| json!(n))
+        client::set_relay_report(&d, &u)
+            .map(|(notified, total)| json!({ "notified": notified, "total": total }))
             .map_err(|e| format!("{e:#}"))
     })
 }

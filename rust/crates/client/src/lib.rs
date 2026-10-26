@@ -66,6 +66,29 @@ struct SelfState {
     name: Option<String>,
 }
 
+/// 采用一条换中继通知（`route` 帧）。返回是否真的改了路由。
+///
+/// 序号只增不减：迟到的旧帧 / 重投的帧**不能**把地址改回去，否则消息会继续
+/// 打到已废弃的队列上，两边界面上还都显示正常。老版本客户端不发 seq（0）——
+/// 只在本地还没采纳过带序号的通知时才认它，避免老帧把新地址盖掉。
+fn apply_route(c: &mut Contact, new_qid: &str, new_relays: Vec<String>, seq: u64) -> bool {
+    if new_qid.is_empty() || new_relays.is_empty() {
+        return false;
+    }
+    let fresh = if seq == 0 {
+        c.route_seq == 0
+    } else {
+        seq >= c.route_seq
+    };
+    if !fresh {
+        return false;
+    }
+    c.qid = new_qid.to_string();
+    c.relays = new_relays;
+    c.route_seq = seq;
+    true
+}
+
 /// 自己用过的中继，随消息带给对方，让对方"回得回来"。
 /// 空的就返回 None，免得在载荷里塞个空数组占地方。
 fn self_relays(me: &SelfState) -> Option<Vec<String>> {
@@ -118,6 +141,20 @@ pub struct Contact {
     /// 加了这个字段后，App 里显示的永远是 alias 优先——联系人自己改名不影响你的称呼。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// 最近一次采纳的 `route` 帧序号（对方换中继时发的时间戳，本地单调）。
+    ///
+    /// 为什么需要：`route` 帧以前是"收到就覆盖"。双方同时换中继、或者旧帧迟到/重投时，
+    /// 一条过期的通知会把新地址改回旧的，之后消息全打到废弃队列上，而且两边都看不出来。
+    /// 0 = 从没收到过带序号的通知（老版本客户端），此时仍然无条件采纳老帧。
+    #[serde(default)]
+    pub route_seq: u64,
+    /// 最近一次收到对方任何东西的本地时间（unix 秒，0 = 从没收到）。
+    ///
+    /// 用来给界面一个"最近活跃"提示。**只在本地记录、绝不向中继查询**：
+    /// 让中继告诉我们"某人是否在线"等于把社交图谱交给运营者，与设计前提冲突。
+    /// 所以界面只能显示"最近 X 前活跃过"，而不是"现在在线"。
+    #[serde(default)]
+    pub last_seen: u64,
 }
 
 /// 收到的一条消息，序列化后交给上层
@@ -772,6 +809,8 @@ pub fn add(dir: &str, code: &str, alias: Option<&str>) -> Result<String> {
         qid: inv.qid,
         relays: inv.relays,
         alias: old_alias,
+        route_seq: 0,
+        last_seen: 0,
     });
     save_contacts(&dir, &cs)?;
     Ok(final_name)
@@ -909,6 +948,8 @@ pub fn add_from_card(
         qid,
         relays,
         alias: None,
+        route_seq: 0,
+        last_seen: 0,
     });
     save_contacts(&dir, &cs)?;
     Ok(final_name)
@@ -1231,6 +1272,14 @@ pub fn purge_queue(dir: &str) -> Result<u64> {
 ///
 /// 返回值：通知到的联系人数（不是"改了他们的中继"）。
 pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
+    set_relay_report(dir, url).map(|(n, _)| n)
+}
+
+/// 同 [`set_relay`]，但返回 `(已通知数, 应通知数)`。
+///
+/// 上层要拿两个数才能说清"3 个联系人里只通知到 2 个"——只说已通知数的话，
+/// 用户以为全都知道了，实际有个人的中继当时正好挂了。
+pub fn set_relay_report(dir: &str, url: &str) -> Result<(usize, usize)> {
     let dir = PathBuf::from(dir);
     let url = url.trim().to_string();
     if url.is_empty() {
@@ -1239,10 +1288,9 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
     let lock = dev_lock(&dir);
     let _guard = lock.lock().expect("设备锁中毒");
     let mut me = load_self(&dir)?;
-
     // 已经是这个中继就没必要重建队列（重建会换 qid，等于让所有联系人重新学一遍）
     if me.relays.first().map(|r| r == &url).unwrap_or(false) {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     // 还没有自己的队列（新装、从没生成过邀请码）：那就把"切中继"理解成
@@ -1261,7 +1309,7 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
         me.relays = vec![url.clone()];
         save_self(&dir, &me)?;
         warn(format!("已在 {url} 建立队列 {q}"));
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     // 在新中继上建一个新队列：连通性验证 + 拿到新收件地址，一步完成。
@@ -1286,29 +1334,17 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
     // （不上浮到 UI，也不落聊天记录）。
     let mut dev = Device::load(&dir)?;
     let cs = load_contacts(&dir)?;
+    // 单调序号（秒级时间戳够用：同一个人不可能在一秒内换两次中继）。
+    // 接收端按它判新旧，见 route 帧的处理分支。
+    let seq = proto::now_secs();
     let mut notified = 0usize;
+    let mut failed: Vec<PendingRoute> = Vec::new();
     for c in &cs {
         // 没有中继记录的联系人推不到，跳过（不是错误）
         if c.relays.is_empty() {
             continue;
         }
-        let body = serde_json::json!({ "qid": new_qid, "relays": [url] }).to_string();
-        let mid = proto::new_message_id();
-        let w = match dev.encrypt(
-            &c.dh,
-            &Payload {
-                v: PAYLOAD_VERSION,
-                id: mid,
-                from: dev.id(),
-                ts: proto::now_secs(),
-                text: String::new(),
-                reply_qid: me.qid.clone(),
-                reply_relays: self_relays(&me),
-                self_name: me.name.clone(),
-                kind: "route".to_string(),
-                body: Some(body),
-            },
-        ) {
+        let w = match route_wire(&mut dev, &me, &c.dh, &new_qid, &[url.clone()], seq) {
             Ok(w) => w,
             // 某个联系人没有可用会话（比如刚被删过会话）：跳过，不阻断整体切换
             Err(_) => continue,
@@ -1317,14 +1353,293 @@ pub fn set_relay(dir: &str, url: &str) -> Result<usize> {
         let ok = rt().block_on(put_first(&c.relays, &c.qid, &[w])).is_ok();
         if ok {
             notified += 1;
+        } else {
+            // 推失败不能就这么算了：对方中继那一刻可能正好在维护，
+            // 不重试的话他永远不知道新地址，此后一直往废弃队列发——
+            // 发送方界面还显示"已发送"，双方都看不出问题。
+            failed.push(PendingRoute {
+                dh: c.dh.clone(),
+                qid: c.qid.clone(),
+                relays: c.relays.clone(),
+                new_qid: new_qid.clone(),
+                new_relays: vec![url.clone()],
+                seq,
+            });
         }
     }
     dev.save(&dir)?;
 
+    if !failed.is_empty() {
+        let mut all = load_pending_routes(&dir);
+        // 本次尝试过的联系人一律用最新结果替换：成功的不该再补发旧通知，
+        // 失败的换成这一轮的新地址（换两次中继时只留最后一条）。
+        let touched: Vec<&str> = cs
+            .iter()
+            .filter(|c| !c.relays.is_empty())
+            .map(|c| c.dh.as_str())
+            .collect();
+        all.retain(|p| !touched.contains(&p.dh.as_str()));
+        all.extend(failed.iter().cloned());
+        if let Err(e) = save_pending_routes(&dir, &all) {
+            warn(format!("换中继：待补发通知落盘失败（本次运行内仍会重试）: {e:#}"));
+        }
+        warn(format!(
+            "换中继：{notified} 位联系人已通知，{} 位暂未送达（已排队，联网后自动补发）",
+            failed.len()
+        ));
+    } else {
+        // 全部成功：清掉可能残留的旧待办
+        let mut all = load_pending_routes(&dir);
+        let touched: Vec<&str> = cs
+            .iter()
+            .filter(|c| !c.relays.is_empty())
+            .map(|c| c.dh.as_str())
+            .collect();
+        if all.iter().any(|p| touched.contains(&p.dh.as_str())) {
+            all.retain(|p| !touched.contains(&p.dh.as_str()));
+            let _ = save_pending_routes(&dir, &all);
+        }
+    }
+
     if let Some(o) = old_qid {
         warn(format!("已切换到新中继 {url}，新队列 {new_qid}（旧队列 {o} 已弃用）"));
     }
-    Ok(notified)
+    let total = cs.iter().filter(|c| !c.relays.is_empty()).count();
+    Ok((notified, total))
+}
+
+/// 待补发的 `route` 通知。
+///
+/// 单独存一个文件而不是塞进 `self.json`：身份文件要保持最小、最好别因
+/// 一个可有可无的队列字段而变脏；这里丢一条也只是"对方晚点知道新地址"。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingRoute {
+    /// 收件人（按 dh 定位加密会话）
+    dh: String,
+    /// 往哪儿投：对方队列与其所在中继
+    qid: String,
+    relays: Vec<String>,
+    /// 要告诉对方的内容：我的新队列 + 新中继
+    new_qid: String,
+    new_relays: Vec<String>,
+    seq: u64,
+}
+
+fn pending_routes_path(dir: &Path) -> std::path::PathBuf {
+    dir.join("pending_routes.json")
+}
+
+fn load_pending_routes(dir: &Path) -> Vec<PendingRoute> {
+    let p = pending_routes_path(dir);
+    match std::fs::read(&p) {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
+            // 坏文件不能让每次重试都失败：备份一份然后当空处理
+            warn(format!("pending_routes.json 解析失败，已忽略: {e}"));
+            Vec::new()
+        }),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn save_pending_routes(dir: &Path, list: &[PendingRoute]) -> Result<()> {
+    let p = pending_routes_path(dir);
+    if list.is_empty() {
+        let _ = std::fs::remove_file(&p);
+        return Ok(());
+    }
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(list)?)?;
+    std::fs::rename(&tmp, &p)?;
+    Ok(())
+}
+
+/// 构造一条控制帧（`route` / `rcpt` 等）：空正文 + JSON 内容。
+fn control_wire(dev: &mut Device, me: &SelfState, dh: &str, kind: &str, body: String) -> Result<Wire> {
+    dev.encrypt(
+        dh,
+        &Payload {
+            v: PAYLOAD_VERSION,
+            id: proto::new_message_id(),
+            from: dev.id(),
+            ts: proto::now_secs(),
+            text: String::new(),
+            reply_qid: me.qid.clone(),
+            reply_relays: self_relays(me),
+            self_name: me.name.clone(),
+            kind: kind.to_string(),
+            body: Some(body),
+        },
+    )
+}
+
+/// 构造一条 `route` 控制帧（换中继后通知对方新收件地址）。
+fn route_wire(
+    dev: &mut Device,
+    me: &SelfState,
+    dh: &str,
+    new_qid: &str,
+    relays: &[String],
+    seq: u64,
+) -> Result<Wire> {
+    let body = serde_json::json!({ "qid": new_qid, "relays": relays, "seq": seq }).to_string();
+    control_wire(dev, me, dh, "route", body)
+}
+
+// ---------------------------------------------------------------- 送达回执
+
+/// 待回执的消息（按对方 dh 分组）。落盘：App 收到消息后可能立刻被系统杀掉，
+/// 回执丢了对方就永远停在"单勾"。
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PendingReceipts {
+    #[serde(default)]
+    peers: Vec<PeerReceipts>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PeerReceipts {
+    dh: String,
+    ids: Vec<String>,
+}
+
+/// 每个 peer 一次最多带多少条 id：一帧几十 KB 会被中继的尺寸校验拦住，
+/// 也犯不着为回执做分片——攒够就发，发不完下轮继续。
+const RECEIPT_BATCH: usize = 100;
+
+fn receipts_path(dir: &Path) -> std::path::PathBuf {
+    dir.join("pending_receipts.json")
+}
+
+fn load_receipts(dir: &Path) -> PendingReceipts {
+    std::fs::read(receipts_path(dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_receipts(dir: &Path, r: &PendingReceipts) -> Result<()> {
+    let p = receipts_path(dir);
+    if r.peers.is_empty() {
+        let _ = std::fs::remove_file(&p);
+        return Ok(());
+    }
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(r)?)?;
+    std::fs::rename(&tmp, &p)?;
+    Ok(())
+}
+
+/// 记一条"已到达"待回执。调用方已持有设备锁（回收消息路径），这里只碰回执文件。
+fn queue_receipt(dir: &Path, dh: &str, id: &str) {
+    if dh.is_empty() || id.is_empty() {
+        return;
+    }
+    let mut r = load_receipts(dir);
+    match r.peers.iter_mut().find(|p| p.dh == dh) {
+        Some(p) => {
+            if !p.ids.iter().any(|x| x == id) {
+                p.ids.push(id.to_string());
+            }
+        }
+        None => r.peers.push(PeerReceipts {
+            dh: dh.to_string(),
+            ids: vec![id.to_string()],
+        }),
+    }
+    if let Err(e) = save_receipts(dir, &r) {
+        warn(format!("送达回执落盘失败（对方会停在单勾）: {e:#}"));
+    }
+}
+
+/// 把攒下的送达回执发出去。返回发出的回执条数。
+///
+/// 由上层服务在收消息循环里调用（每轮一次，空表是纯文件读）。
+pub fn flush_receipts(dir: &str) -> Result<usize> {
+    let dir = PathBuf::from(dir);
+    let pend = load_receipts(&dir);
+    if pend.peers.is_empty() {
+        return Ok(0);
+    }
+    let lock = dev_lock(&dir);
+    let _guard = lock.lock().expect("设备锁中毒");
+    let me = load_self(&dir)?;
+    let contacts = load_contacts(&dir).unwrap_or_default();
+    let mut dev = Device::load(&dir)?;
+    let mut sent = 0usize;
+    let mut left: Vec<PeerReceipts> = Vec::new();
+
+    for pr in pend.peers {
+        let Some(c) = contacts.iter().find(|c| c.dh == pr.dh) else {
+            // 联系人已删：回执没有意义
+            continue;
+        };
+        if c.relays.is_empty() || pr.ids.is_empty() {
+            continue;
+        }
+        let batch: Vec<String> = pr.ids.iter().take(RECEIPT_BATCH).cloned().collect();
+        let rest: Vec<String> = pr.ids.iter().skip(RECEIPT_BATCH).cloned().collect();
+        let body = serde_json::json!({ "ids": batch }).to_string();
+        let w = match control_wire(&mut dev, &me, &c.dh, "rcpt", body) {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+        if rt().block_on(put_first(&c.relays, &c.qid, &[w])).is_ok() {
+            sent += batch.len();
+        } else {
+            // 发不出去就原样留着，下一轮继续
+            left.push(PeerReceipts {
+                dh: pr.dh.clone(),
+                ids: pr.ids.clone(),
+            });
+            continue;
+        }
+        if !rest.is_empty() {
+            left.push(PeerReceipts {
+                dh: pr.dh,
+                ids: rest,
+            });
+        }
+    }
+    dev.save(&dir)?;
+    save_receipts(&dir, &PendingReceipts { peers: left })?;
+    Ok(sent)
+}
+
+/// 补发之前没推成功的换中继通知。返回本次成功的条数。
+///
+/// 由上层（Android 收消息循环）在连接正常时定期调用；没有待办时是纯文件读，
+/// 开销可以忽略。
+pub fn flush_pending_routes(dir: &str) -> Result<usize> {
+    let dir = PathBuf::from(dir);
+    let lock = dev_lock(&dir);
+    let _guard = lock.lock().expect("设备锁中毒");
+
+    let pend = load_pending_routes(&dir);
+    if pend.is_empty() {
+        return Ok(0);
+    }
+    let me = load_self(&dir)?;
+    let mut dev = Device::load(&dir)?;
+    let mut done = 0usize;
+    let mut left: Vec<PendingRoute> = Vec::new();
+
+    for p in pend {
+        let w = match route_wire(&mut dev, &me, &p.dh, &p.new_qid, &p.new_relays, p.seq) {
+            Ok(w) => w,
+            // 会话没了（联系人被删/重装）：这条通知已经无处可投，直接丢弃
+            Err(_) => continue,
+        };
+        if rt().block_on(put_first(&p.relays, &p.qid, &[w])).is_ok() {
+            done += 1;
+        } else {
+            left.push(p);
+        }
+    }
+    dev.save(&dir)?;
+    save_pending_routes(&dir, &left)?;
+    if done > 0 {
+        warn(format!("换中继通知补发成功 {done} 条，剩余 {} 条", left.len()));
+    }
+    Ok(done)
 }
 
 /// 删除联系人：联系人列表 + Olm 会话状态一起清。
@@ -1494,10 +1809,16 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
                                     })
                                     .unwrap_or_default();
                                 if !new_qid.is_empty() && !new_relays.is_empty() {
+                                    let seq = v.get("seq").and_then(|x| x.as_u64()).unwrap_or(0);
                                     if let Some(c) = cs.iter_mut().find(|c| c.dh == dh) {
-                                        c.qid = new_qid.to_string();
-                                        c.relays = new_relays;
-                                        updated = save_contacts(dir, &cs).is_ok();
+                                        let before = c.route_seq;
+                                        if apply_route(c, new_qid, new_relays, seq) {
+                                            updated = save_contacts(dir, &cs).is_ok();
+                                        } else {
+                                            warn(format!(
+                                                "对方 {dh} 的换中继通知序号过旧（{seq} <= {before}），已忽略"
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -1517,10 +1838,32 @@ async fn a_recv_once(dir: &Path, timeout_secs: u64) -> Result<Option<Incoming>> 
                         return Ok(None);
                     }
 
-                    let from_name = load_contacts(dir)
-                        .ok()
-                        .and_then(|cs| cs.into_iter().find(|c| c.dh == dh))
-                        .map(|c| c.name);
+                    // 顺手记"最近活跃"：任何一条能解开的帧都算对方活着。
+                    // 节流 30 秒一次落盘——每条消息都重写 contacts.json 不划算，
+                    // 而这个字段的精度本来就只到分钟级。
+                    let from_name = match load_contacts(dir) {
+                        Ok(mut cs) => {
+                            let mut name = None;
+                            if let Some(c) = cs.iter_mut().find(|c| c.dh == dh) {
+                                name = Some(c.name.clone());
+                                let now = proto::now_secs();
+                                if now.saturating_sub(c.last_seen) >= 30 {
+                                    c.last_seen = now;
+                                    if let Err(e) = save_contacts(dir, &cs) {
+                                        warn(format!("最近活跃时间落盘失败: {e:#}"));
+                                    }
+                                }
+                            }
+                            name
+                        }
+                        Err(_) => None,
+                    };
+                    // 普通文本给发送方回一条"已到达本机"的回执（双勾）。
+                    // 只对 text 记：文件分块有 800 多条，逐块回执是纯浪费；
+                    // 控制帧（通话/撤回）对方不需要知道我们收没收到。
+                    if p.kind == secure::kind::TEXT && !p.id.is_empty() {
+                        queue_receipt(dir, &dh, &p.id);
+                    }
                     // clone 一份给 ack：mid 还要塞进 Incoming 供上层去做通话信令去重
                     ack_or_warn(&mut conn, &qid, &mid).await;
                     saved?;
@@ -2050,6 +2393,83 @@ mod tests {
         assert_eq!(local_name(&d).unwrap().as_deref(), Some("Alice"));
         // 第二次必须拒绝，否则会覆盖身份
         assert!(init(&d, None).is_err());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    fn c_with(seq: u64) -> Contact {
+        Contact {
+            name: "Bob".into(),
+            pk: "pk".into(),
+            dh: "dh".into(),
+            qid: "old-qid".into(),
+            relays: vec!["ws://old".into()],
+            alias: None,
+            route_seq: seq,
+            last_seen: 0,
+        }
+    }
+
+    #[test]
+    fn route_notice_applies_newer_and_ignores_older() {
+        let mut c = c_with(0);
+        assert!(apply_route(&mut c, "q2", vec!["ws://r2".into()], 100));
+        assert_eq!(c.qid, "q2");
+        assert_eq!(c.relays, vec!["ws://r2".to_string()]);
+        assert_eq!(c.route_seq, 100);
+
+        // 迟到的旧通知不能把地址改回去
+        assert!(!apply_route(&mut c, "q1", vec!["ws://r1".into()], 99));
+        assert_eq!(c.qid, "q2", "旧序号的通知必须被忽略");
+        assert_eq!(c.relays, vec!["ws://r2".to_string()]);
+
+        // 同一序号重投：幂等
+        assert!(apply_route(&mut c, "q2", vec!["ws://r2".into()], 100));
+        assert_eq!(c.qid, "q2");
+    }
+
+    #[test]
+    fn route_notice_from_legacy_client_does_not_revert_seq() {
+        // 老版本客户端不发 seq（0）。本地已采纳过带序号的通知后，
+        // 再来老帧必须忽略——否则一次"降级安装"就能把新地址覆盖回去。
+        let mut c = c_with(0);
+        assert!(apply_route(&mut c, "q2", vec!["ws://r2".into()], 100));
+        assert!(!apply_route(&mut c, "q1", vec!["ws://r1".into()], 0));
+        assert_eq!(c.qid, "q2");
+
+        // 反过来：从没见过序号时，老帧仍然要认（跨版本兼容）
+        let mut fresh = c_with(0);
+        assert!(apply_route(&mut fresh, "q9", vec!["ws://r9".into()], 0));
+        assert_eq!(fresh.qid, "q9");
+    }
+
+    #[test]
+    fn route_notice_rejects_empty_target() {
+        let mut c = c_with(0);
+        assert!(!apply_route(&mut c, "", vec!["ws://r".into()], 1));
+        assert!(!apply_route(&mut c, "q", Vec::new(), 1));
+        assert_eq!(c.qid, "old-qid");
+    }
+
+    #[test]
+    fn pending_routes_roundtrip() {
+        let d = PathBuf::from(tmpdir("pending"));
+        assert!(load_pending_routes(&d).is_empty());
+        let list = vec![PendingRoute {
+            dh: "dh1".into(),
+            qid: "q1".into(),
+            relays: vec!["ws://r1".into()],
+            new_qid: "q2".into(),
+            new_relays: vec!["ws://r2".into()],
+            seq: 42,
+        }];
+        save_pending_routes(&d, &list).unwrap();
+        let back = load_pending_routes(&d);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].new_qid, "q2");
+        assert_eq!(back[0].seq, 42);
+        // 清空后文件要消失，别留个空数组让下次误以为有活
+        save_pending_routes(&d, &[]).unwrap();
+        assert!(!pending_routes_path(&d).exists());
         std::fs::remove_dir_all(&d).ok();
     }
 

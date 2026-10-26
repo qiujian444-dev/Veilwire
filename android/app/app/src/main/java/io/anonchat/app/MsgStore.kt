@@ -132,6 +132,24 @@ class MsgStore(private val dir: File) {
         }
     }
 
+    /**
+     * 收到对方的送达回执：按 rid 点亮自己发出的消息。返回真正改了几条
+     * （已经点亮的、找不到的都不重复写日志）。
+     */
+    fun markDelivered(who: String, rids: List<String>): Int = synchronized(this) {
+        val list = data[who] ?: return 0
+        var n = 0
+        for (rid in rids) {
+            if (rid.isBlank()) continue
+            val idx = list.indexOfFirst { it.rid == rid && it.outgoing && !it.delivered }
+            if (idx < 0) continue
+            list[idx] = list[idx].copy(delivered = true)
+            writeLine(JSONObject().put("o", "ac").put("w", who).put("r", rid))
+            n++
+        }
+        n
+    }
+
     private fun msgLine(who: String, m: Msg): JSONObject {
         val o = JSONObject()
             .put("o", "m").put("w", who)
@@ -145,6 +163,7 @@ class MsgStore(private val dir: File) {
         // 焚毁档位和首次展示时间（0 不写）
         if (m.burn > 0) o.put("b", m.burn)
         if (m.seenAt > 0) o.put("sa", m.seenAt)
+        if (m.delivered) o.put("dl", true)
         return o
     }
 
@@ -331,6 +350,16 @@ class MsgStore(private val dir: File) {
                                 list[idx] = list[idx].copy(seenAt = sa)
                             }
                         }
+                        "ac" -> {
+                            // 送达回执：按 rid 点亮自己发出的那条（幂等，重复回执无副作用）
+                            val who = o.optString("w")
+                            val rid = o.optString("r")
+                            val list = data[who] ?: return@forEach
+                            val idx = list.indexOfFirst { it.rid == rid && it.outgoing }
+                            if (idx >= 0 && !list[idx].delivered) {
+                                list[idx] = list[idx].copy(delivered = true)
+                            }
+                        }
                         "del" -> {
                             // 撤回的回放：带 "r" 的是按 rid 定位（原位置替换成灰字记录），
                             // 不带 "r" 的是按本地 id 直接删（重发成功后清掉失败那条）
@@ -498,5 +527,6 @@ class MsgStore(private val dir: File) {
         rid = o.optString("r"),
         burn = o.optLong("b"),
         seenAt = o.optLong("sa"),
+        delivered = o.optBoolean("dl"),
     )
 }
