@@ -21,7 +21,7 @@
 | Android 客户端 | Kotlin + Compose | `android/app/` | UI、通知、WebRTC、相册/相机、前台服务 |
 | 中继 | Rust（同一个 workspace） | `rust/crates/relay/` | 无标识队列 + 内嵌 TURN + DHT 自公布 |
 
-**当前版本**：`0.15.13` / `versionCode 40`（见 `android/app/app/build.gradle.kts`）
+**当前版本**：`0.15.14` / `versionCode 41`（见 `android/app/app/build.gradle.kts`）
 **协议版本**：`proto::PROTOCOL_VERSION`，改帧结构必须同时考虑旧客户端兼容性。
 
 ---
@@ -201,6 +201,34 @@ restart offer 一律拒**（`peer_gen < gen < self.gen` 的中间值曾从守卫
 的关系图交给运营者，与"中继只做加密转发"的前提冲突。
 要加更准的在线感知，先想清楚愿意付出多少元数据，再动代码。
 
+### 4.5.5 后台存活：四条腿，少一条就少一截
+
+收消息与通话信令完全依赖"进程活着 + WebSocket 连着"——**没有接任何厂商推送**
+（FCM/HMS/MiPush 会把"谁在什么时候收消息"交给厂商，与匿名前提冲突）。所以：
+
+| 机制 | 代码 | 作用 |
+|---|---|---|
+| 前台服务（`remoteMessaging` + 常驻通知） | `MessagingService`，`START_STICKY` | 常态保活 |
+| 9 分钟精确闹钟 | `KeepaliveReceiver.schedule()` | 进程被杀后拉回 |
+| 15 分钟周期 job | `ReviveJobService.schedule()` | 闹钟被 ROM 拦掉时的第二条腿 |
+| 开机自启 | `BootReceiver` | 重启后恢复 |
+
+两条复活通道**必须一起排**：`KeepaliveReceiver.schedule()` 里顺带调
+`ReviveJobService.schedule()`，让"任何安排过闹钟的地方"自动带上 job。
+实测线索：鸿蒙的"应用启动管理"会同时拦闹钟投递和闹钟回调里的后台启动，
+只有 JobScheduler 还有机会；反过来也有 ROM 拦 job 不拦闹钟。
+
+**电池优化白名单不管厂商策略。** `isIgnoringBatteryOptimizations` 只豁免 Android 的
+Doze；鸿蒙/小米自己的"应用启动管理""省电策略"是独立的闸，用户必须单独开
+（见 `BatteryOpt.openOemSettings`）。排查"后台收不到"时先分清是这一层还是代码问题。
+
+### 4.5.6 迟到信令必须丢弃
+
+进程被杀/冻住期间，队列里会积压早已结束的通话。`CallManager.onSignal` 对
+`call.offer` 做年龄判断（`CallStaleness`，阈值 120s，远大于 45s 振铃窗口），
+过期直接丢——否则用户一打开 App 就会看到幽灵来电再干响 45 秒。
+`ts <= 0`（老客户端）一律放行，时钟偏快（age 为负）也放行。
+
 ### 4.6 信令的 API 边界：只透出"被接受"的 SDP
 
 `call_inbound` 组装 CallEvent 时，**offer 的 remote_sdp/video 只能在状态机
@@ -256,6 +284,7 @@ restart offer 一律拒**（`peer_gen < gen < self.gen` 的中间值曾从守卫
 | 改发送/路由 | 先读 4.2，改完跑 `relay_failover` / `cross_relay_routing` / `reply_clue` |
 | 改通话 | 改 `call.rs` 状态机要同步加单测；UI 侧看 `CallManager` 的 `ui` 状态；改完必读 4.5.1 / 4.5.2（显示名、覆盖层触摸、接听权限、FGS 类型） |
 | 加控制帧 / 改路由通知 | 先读 4.5.3（seq 单调、失败排队重试、回执只给文本） |
+| 排查"后台收不到" | 先读 4.5.5：分清是厂商后台策略（四条腿全被拦）还是代码问题；复活通道必须两条一起排 |
 | 改中继 | 注意数据目录兼容性（`queues.log` 回放），以及 TURN 的 SSRF 默认拒绝回环 |
 | 部署中继 | `docs/中继部署指南.md`；验证用 `scripts/relay_check.py <ip>:8080 --dht` |
 

@@ -478,6 +478,22 @@ object CallManager {
     /** 收到一条通话信令，交给 Rust 状态机，再按结果驱动 WebRTC/UI */
     fun onSignal(inc: Incoming) {
         val ctx = appCtx ?: return
+        // 迟到的来电：进程被杀/冻住、或离线期间，主叫早就放弃了，但 offer 还躺在
+        // 队列里。不丢的话，用户一打开 App 就会看到一个早已结束的通话界面，
+        // 再干响 45 秒（被叫侧振铃超时）才判"未接"——真机实测就是这个现象。
+        //
+        // 时间基准用载荷里的发送时间（两台设备的墙上时钟）。已知两端时钟可能有
+        // 偏差，所以阈值取 120s：远大于 45s 的振铃窗口，只有真正的"迟到"才会命中；
+        // 时钟偏差到两分钟以上的设备本来也没法正常用这个 App。
+        // 老客户端/缺字段时 ts=0，不拦。
+        if (inc.kind == "call.offer") {
+            val now = System.currentTimeMillis() / 1000
+            val age = now - inc.ts
+            if (CallStaleness.isStale(inc.ts, now)) {
+                Log.i(TAG, "dropping stale offer: age=${age}s (call has long ended)")
+                return
+            }
+        }
         val r = Repo.callInbound(inc)
         val ev = r.data
         if (!r.ok || ev == null) {

@@ -70,6 +70,9 @@ class KeepaliveReceiver : BroadcastReceiver() {
             }.onFailure {
                 am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, next, pi)
             }
+            // 闹钟和 job 一起排：有的 ROM 拦闹钟、有的拦 job，两条腿都断才真的没救。
+            // 放在这里而不是各个调用方，是为了让"任何安排过闹钟的地方"自动带上 job。
+            ReviveJobService.schedule(ctx)
         }
 
         private const val INTERVAL_MS = 9 * 60 * 1000L

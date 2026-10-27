@@ -102,6 +102,12 @@
             android:name=".KeepaliveReceiver"
             android:exported="false" />
 
+        <!-- 第二条复活通道：JobScheduler。有些 ROM 拦闹钟但不拦 job（见 ReviveJobService 注释） -->
+        <service
+            android:name=".ReviveJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
         <!-- 来电通知上的接听/拒接按钮（CallStyle.forIncomingCall 需要） -->
         <receiver
             android:name=".CallActionReceiver"

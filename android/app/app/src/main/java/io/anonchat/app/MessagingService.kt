@@ -513,6 +513,9 @@ class MessagingService : Service() {
         isRunning = false
         loopJob?.cancel()
         statsJob?.cancel()
+        // 用户主动停：把复活通道一起撤掉，否则 job 还会在后台把服务拉起来
+        // （PREF_USER_STOPPED 也会兜住，这里只是不再白醒）
+        ReviveJobService.cancel(this)
         // 必须置空：onStartCommand 用 `loopJob == null` 判断要不要重启循环，
         // 留着已 cancel 的 Job 的话，快速关→开会得到"前台通知在、收消息停"
         // 的僵尸服务，最长要等 9 分钟 keepalive 拉新实例才自愈。
